@@ -1,0 +1,20 @@
+.nostr-feed {
+  width: 100%;
+  height: 100%;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  background-color: var(--app-bg-color );
+  overflow: hidden;
+}
+
+.notes-container {
+  width: 100%;
+  max-width: 100%;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  box-sizing: border-box;
+  background-color: var(--app-bg-color );
+} 

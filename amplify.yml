@@ -1,0 +1,90 @@
+version: 1
+appRoot: .
+frontend:
+  phases:
+    preBuild:
+      commands:
+        - npm ci
+    build:
+      commands:
+        - npm run build
+        - echo "/*    /index.html   200" > dist/_redirects
+        - echo "/*/    /index.html   200" >> dist/_redirects
+
+  artifacts:
+    baseDirectory: dist
+    files:
+      - "**/*"
+  cache:
+    paths:
+      - node_modules/**/*
+  customHeaders:
+    # Cache control for static assets with hashes (can cache longer)
+    - pattern: "/assets/**"
+      headers:
+        - key: "Cache-Control"
+          value: "public, max-age=31536000, immutable"
+        - key: "Strict-Transport-Security"
+          value: "max-age=31536000; includeSubDomains"
+        - key: "X-Content-Type-Options"
+          value: "nosniff"
+        - key: "X-Frame-Options"
+          value: "DENY"
+        - key: "X-XSS-Protection"
+          value: "1; mode=block"
+
+    # Main HTML file - no caching to ensure updates
+    - pattern: "/index.html"
+      headers:
+        - key: "Cache-Control"
+          value: "no-cache, no-store, must-revalidate"
+        - key: "Pragma"
+          value: "no-cache"
+        - key: "Expires"
+          value: "0"
+        - key: "Strict-Transport-Security"
+          value: "max-age=31536000; includeSubDomains"
+        - key: "X-Content-Type-Options"
+          value: "nosniff"
+        - key: "X-Frame-Options"
+          value: "DENY"
+        - key: "X-XSS-Protection"
+          value: "1; mode=block"
+
+    # Service worker and manifest - short cache to allow updates
+    - pattern: "/sw.js"
+      headers:
+        - key: "Cache-Control"
+          value: "no-cache, no-store, must-revalidate"
+        - key: "Pragma"
+          value: "no-cache"
+        - key: "Expires"
+          value: "0"
+
+    - pattern: "/registerSW.js"
+      headers:
+        - key: "Cache-Control"
+          value: "no-cache, no-store, must-revalidate"
+        - key: "Pragma"
+          value: "no-cache"
+        - key: "Expires"
+          value: "0"
+
+    - pattern: "/manifest.json"
+      headers:
+        - key: "Cache-Control"
+          value: "public, max-age=3600"
+
+    # Default headers for everything else
+    - pattern: "**/*"
+      headers:
+        - key: "Cache-Control"
+          value: "public, max-age=3600"
+        - key: "Strict-Transport-Security"
+          value: "max-age=31536000; includeSubDomains"
+        - key: "X-Content-Type-Options"
+          value: "nosniff"
+        - key: "X-Frame-Options"
+          value: "DENY"
+        - key: "X-XSS-Protection"
+          value: "1; mode=block"

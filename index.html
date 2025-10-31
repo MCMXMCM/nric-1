@@ -1,0 +1,187 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/x-icon" href="/favicon.ico" />
+    <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png" />
+    <link rel="icon" type="image/png" sizes="16x16" href="/favicon-16.png" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, user-scalable=no" />
+    <meta name="theme-color" content="var(--app-bg-color)" />
+    
+    <!-- Basic meta information -->
+    <meta name="description" content="Note Relay Interlink Client." />
+    <meta name="keywords" content="nostr, decentralized, social media, ascii art, terminal, blockchain, bitcoin, btc" />
+    <meta name="author" content="NRIC-1" />
+    
+    <!-- Open Graph meta tags for rich link previews -->
+    <meta property="og:type" content="website" />
+    <meta property="og:title" content="NRIC-1 - Note Relay Interlink Client." />
+    <meta property="og:description" content="Note Relay Interlink Client. " />
+    <meta property="og:image" content="https://nric-1.com/share-image.png" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta property="og:image:alt" content="NRIC-1 - Note Relay Interlink Client." />
+    <meta property="og:url" content="https://nric-1.com" />
+    <meta property="og:site_name" content="NRIC-1" />
+    <meta property="og:locale" content="en_US" />
+    
+    <!-- Twitter Card meta tags -->
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="NRIC-1 - Note Relay Interlink Client.." />
+    <meta name="twitter:description" content="An Asciified Nostr client. " />
+    <meta name="twitter:image" content="https://nric-1.com/share-image.png" />
+    <meta name="twitter:image:alt" content="NRIC-1 - an asciified Nostr client." />
+    <meta name="twitter:site" content="@nric-1" />
+    <meta name="twitter:creator" content="@nric-1" />
+    
+    <!-- Additional meta tags for better SEO and sharing -->
+    <meta name="robots" content="index, follow" />
+    <meta name="language" content="English" />
+    <meta name="revisit-after" content="7 days" />
+    <link rel="canonical" href="https://nric-1.com" />
+    <!-- Immediate black background to prevent white flash -->
+    <style>
+      html, body, #root {
+        background-color: var(--app-bg-color , #000000) !important;
+        margin: 0 !important;
+        padding: 0 !important;
+        width: 100% !important;
+        height: 100% !important;
+        overflow: hidden !important;
+      }
+      /* Override any potential white backgrounds immediately */
+      * {
+        background-color: inherit;
+      }
+    </style>
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black" />
+    <script>
+      // Set initial theme colors based on user preference
+      (function() {
+        function updateThemeColors() {
+          const isDarkMode = localStorage.getItem('darkMode') === 'true' ||
+                            (localStorage.getItem('darkMode') === null &&
+                             window.matchMedia('(prefers-color-scheme: dark)').matches);
+
+          const themeColor = isDarkMode ? '#000000' : '#f5efe5';
+          const statusBarStyle = isDarkMode ? 'black' : 'default';
+          const backgroundColor = isDarkMode ? '#000000' : '#f5efe5';
+
+          // Update theme-color meta tag
+          const themeColorMeta = document.querySelector('meta[name="theme-color"]');
+          if (themeColorMeta) {
+            themeColorMeta.setAttribute('content', themeColor);
+          }
+
+          // Update apple-mobile-web-app-status-bar-style meta tag
+          const statusBarMeta = document.querySelector('meta[name="apple-mobile-web-app-status-bar-style"]');
+          if (statusBarMeta) {
+            statusBarMeta.setAttribute('content', statusBarStyle);
+          }
+
+          // Update CSS background colors
+          const root = document.documentElement;
+          const body = document.body;
+          const rootDiv = document.getElementById('root');
+
+          if (root) {
+            root.style.setProperty('--app-bg-color', backgroundColor);
+          }
+        }
+
+        // Expose function globally for React app to call when theme changes
+        window.updateThemeColors = updateThemeColors;
+        
+        try {
+          // If running as PWA, align app setting to OS mode on startup
+          var isStandalone = window.matchMedia('(display-mode: standalone)').matches || (window.navigator && window.navigator.standalone === true);
+          if (isStandalone) {
+            var prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+            localStorage.setItem('darkMode', prefersDark ? 'true' : 'false');
+            try { window.dispatchEvent(new CustomEvent('darkModeChanged')); } catch {}
+          }
+        } catch {}
+
+        // Set initial theme colors
+        updateThemeColors();
+        
+        // Listen for system theme changes (only if user hasn't manually set a preference)
+        if (localStorage.getItem('darkMode') === null) {
+          window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', updateThemeColors);
+        }
+      })();
+    </script>
+    <meta name="apple-mobile-web-app-title" content="NRIC-1" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="application-name" content="NRIC-1" />
+    <meta name="msapplication-TileColor" content="#000000" />
+    <meta name="msapplication-tap-highlight" content="no" />
+    <meta name="format-detection" content="telephone=no" />
+    
+    <!-- PWA Manifest -->
+    <link rel="manifest" href="/manifest.json" />
+    
+    <!-- Apple Touch Icons -->
+    <link rel="apple-touch-icon" href="/icon-180.png" />
+    <link rel="apple-touch-icon" sizes="57x57" href="/icon-57.png" />
+    <link rel="apple-touch-icon" sizes="60x60" href="/icon-60.png" />
+    <link rel="apple-touch-icon" sizes="72x72" href="/icon-72.png" />
+    <link rel="apple-touch-icon" sizes="76x76" href="/icon-76.png" />
+    <link rel="apple-touch-icon" sizes="96x96" href="/icon-96.png" />
+    <link rel="apple-touch-icon" sizes="114x114" href="/icon-114.png" />
+    <link rel="apple-touch-icon" sizes="120x120" href="/icon-120.png" />
+    <link rel="apple-touch-icon" sizes="144x144" href="/icon-144.png" />
+    <link rel="apple-touch-icon" sizes="152x152" href="/icon-152.png" />
+    <link rel="apple-touch-icon" sizes="167x167" href="/icon-167.png" />
+    <link rel="apple-touch-icon" sizes="180x180" href="/icon-180.png" />
+    <link rel="apple-touch-icon" sizes="192x192" href="/icon-192.png" />
+    <link rel="apple-touch-icon" sizes="512x512" href="/icon-512.png" />
+    <link rel="apple-touch-icon" sizes="1024x1024" href="/icon-1024.png" />
+    
+    <!-- Splash Screen Images for iOS (light/dark variants) -->
+    <!-- iPad Pro 12.9" -->
+    <link rel="apple-touch-startup-image" href="/splash/light-2048x2732.png" media="(prefers-color-scheme: light) and (device-width: 1024px) and (device-height: 1366px) and (-webkit-device-pixel-ratio: 2) and (orientation: portrait)" />
+    <link rel="apple-touch-startup-image" href="/splash/dark-2048x2732.png" media="(prefers-color-scheme: dark) and (device-width: 1024px) and (device-height: 1366px) and (-webkit-device-pixel-ratio: 2) and (orientation: portrait)" />
+    <!-- iPad Pro 11" -->
+    <link rel="apple-touch-startup-image" href="/splash/light-1668x2388.png" media="(prefers-color-scheme: light) and (device-width: 834px) and (device-height: 1194px) and (-webkit-device-pixel-ratio: 2) and (orientation: portrait)" />
+    <link rel="apple-touch-startup-image" href="/splash/dark-1668x2388.png" media="(prefers-color-scheme: dark) and (device-width: 834px) and (device-height: 1194px) and (-webkit-device-pixel-ratio: 2) and (orientation: portrait)" />
+    <!-- iPad Air -->
+    <link rel="apple-touch-startup-image" href="/splash/light-1536x2048.png" media="(prefers-color-scheme: light) and (device-width: 768px) and (device-height: 1024px) and (-webkit-device-pixel-ratio: 2) and (orientation: portrait)" />
+    <link rel="apple-touch-startup-image" href="/splash/dark-1536x2048.png" media="(prefers-color-scheme: dark) and (device-width: 768px) and (device-height: 1024px) and (-webkit-device-pixel-ratio: 2) and (orientation: portrait)" />
+    
+    <!-- iPhone 15 Pro Max -->
+    <link rel="apple-touch-startup-image" href="/splash/light-1290x2796.png" media="(prefers-color-scheme: light) and (device-width: 430px) and (device-height: 932px) and (-webkit-device-pixel-ratio: 3) and (orientation: portrait)" />
+    <link rel="apple-touch-startup-image" href="/splash/dark-1290x2796.png" media="(prefers-color-scheme: dark) and (device-width: 430px) and (device-height: 932px) and (-webkit-device-pixel-ratio: 3) and (orientation: portrait)" />
+    <!-- iPhone 12/13/14 Pro Max -->
+    <link rel="apple-touch-startup-image" href="/splash/light-1284x2778.png" media="(prefers-color-scheme: light) and (device-width: 428px) and (device-height: 926px) and (-webkit-device-pixel-ratio: 3) and (orientation: portrait)" />
+    <link rel="apple-touch-startup-image" href="/splash/dark-1284x2778.png" media="(prefers-color-scheme: dark) and (device-width: 428px) and (device-height: 926px) and (-webkit-device-pixel-ratio: 3) and (orientation: portrait)" />
+    <!-- iPhone 14 Plus -->
+    <link rel="apple-touch-startup-image" href="/splash/light-1179x2556.png" media="(prefers-color-scheme: light) and (device-width: 393px) and (device-height: 852px) and (-webkit-device-pixel-ratio: 3) and (orientation: portrait)" />
+    <link rel="apple-touch-startup-image" href="/splash/dark-1179x2556.png" media="(prefers-color-scheme: dark) and (device-width: 393px) and (device-height: 852px) and (-webkit-device-pixel-ratio: 3) and (orientation: portrait)" />
+    <!-- iPhone XS Max, 11 Pro Max -->
+    <link rel="apple-touch-startup-image" href="/splash/light-1242x2688.png" media="(prefers-color-scheme: light) and (device-width: 414px) and (device-height: 896px) and (-webkit-device-pixel-ratio: 3) and (orientation: portrait)" />
+    <link rel="apple-touch-startup-image" href="/splash/dark-1242x2688.png" media="(prefers-color-scheme: dark) and (device-width: 414px) and (device-height: 896px) and (-webkit-device-pixel-ratio: 3) and (orientation: portrait)" />
+    <!-- iPhone 12/13/14 Pro -->
+    <link rel="apple-touch-startup-image" href="/splash/light-1170x2532.png" media="(prefers-color-scheme: light) and (device-width: 390px) and (device-height: 844px) and (-webkit-device-pixel-ratio: 3) and (orientation: portrait)" />
+    <link rel="apple-touch-startup-image" href="/splash/dark-1170x2532.png" media="(prefers-color-scheme: dark) and (device-width: 390px) and (device-height: 844px) and (-webkit-device-pixel-ratio: 3) and (orientation: portrait)" />
+    <!-- iPhone X, XS, 11 Pro -->
+    <link rel="apple-touch-startup-image" href="/splash/light-1125x2436.png" media="(prefers-color-scheme: light) and (device-width: 375px) and (device-height: 812px) and (-webkit-device-pixel-ratio: 3) and (orientation: portrait)" />
+    <link rel="apple-touch-startup-image" href="/splash/dark-1125x2436.png" media="(prefers-color-scheme: dark) and (device-width: 375px) and (device-height: 812px) and (-webkit-device-pixel-ratio: 3) and (orientation: portrait)" />
+    <!-- iPhone XR, 11 -->
+    <link rel="apple-touch-startup-image" href="/splash/light-828x1792.png" media="(prefers-color-scheme: light) and (device-width: 414px) and (device-height: 896px) and (-webkit-device-pixel-ratio: 2) and (orientation: portrait)" />
+    <link rel="apple-touch-startup-image" href="/splash/dark-828x1792.png" media="(prefers-color-scheme: dark) and (device-width: 414px) and (device-height: 896px) and (-webkit-device-pixel-ratio: 2) and (orientation: portrait)" />
+    <!-- iPhone 8, 7, 6s, 6 -->
+    <link rel="apple-touch-startup-image" href="/splash/light-750x1334.png" media="(prefers-color-scheme: light) and (device-width: 375px) and (device-height: 667px) and (-webkit-device-pixel-ratio: 2) and (orientation: portrait)" />
+    <link rel="apple-touch-startup-image" href="/splash/dark-750x1334.png" media="(prefers-color-scheme: dark) and (device-width: 375px) and (device-height: 667px) and (-webkit-device-pixel-ratio: 2) and (orientation: portrait)" />
+    <!-- iPhone 5s, 5c, 5 -->
+    <link rel="apple-touch-startup-image" href="/splash/light-640x1136.png" media="(prefers-color-scheme: light) and (device-width: 320px) and (device-height: 568px) and (-webkit-device-pixel-ratio: 2) and (orientation: portrait)" />
+    <link rel="apple-touch-startup-image" href="/splash/dark-640x1136.png" media="(prefers-color-scheme: dark) and (device-width: 320px) and (device-height: 568px) and (-webkit-device-pixel-ratio: 2) and (orientation: portrait)" />
+    
+    <title>NRIC-1</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

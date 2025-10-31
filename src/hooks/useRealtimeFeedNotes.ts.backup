@@ -1,0 +1,476 @@
+import { useCallback, useEffect, useRef, useState, useContext } from 'react';
+import React from 'react';
+import { type Filter, type Event } from 'nostr-tools';
+import { NostrContext } from '../contexts/NostrContext';
+import { getGlobalRelayPool } from '../utils/nostr/relayConnectionPool';
+import { extractImageUrls, extractVideoUrls } from '../utils/nostr/utils';
+import { useScrollDirectionDetection } from './useScrollDirectionDetection';
+import type { Note } from '../types/nostr/types';
+
+export interface RealtimeFeedNotesConfig {
+  relayUrls: string[];
+  buildFilter: (until?: number) => Filter;
+  enabled: boolean;
+  mutedPubkeys?: string[];
+  onNewNoteReceived?: (note: Note) => void;
+  maxBufferSize?: number;
+  autoClearOnScroll?: boolean; // Auto-clear buffer when user scrolls up
+  contactsCount?: number; // Track contacts count to restart subscription when contacts load
+}
+
+export interface RealtimeFeedNotesResult {
+  newNotesCount: number;
+  bufferedNotes: Note[];
+  clearBuffer: () => void;
+  getAndClearBufferedNotes: () => Note[];
+  isConnected: boolean;
+  lastReceivedAt: number | null;
+}
+
+/**
+ * Hook for real-time tracking of new feed notes via websocket subscriptions
+ * Maintains a buffer of new notes and provides a counter for UI display
+ */
+export function useRealtimeFeedNotes(config: RealtimeFeedNotesConfig): RealtimeFeedNotesResult {
+  const { nostrClient } = useContext(NostrContext);
+  const [bufferedNotes, setBufferedNotes] = useState<Note[]>([]);
+  const [isConnected, setIsConnected] = useState(false);
+  const [lastReceivedAt, setLastReceivedAt] = useState<number | null>(null);
+  
+  // Refs to maintain stable references across re-renders
+  const subscriptionRef = useRef<{ close: () => void } | null>(null);
+  const seenNoteIds = useRef<Set<string>>(new Set());
+  const isClosing = useRef(false);
+  
+  const {
+    relayUrls,
+    buildFilter,
+    enabled,
+    mutedPubkeys = [],
+    onNewNoteReceived,
+    maxBufferSize = 100,
+    autoClearOnScroll = true,
+    contactsCount = 0
+  } = config;
+
+  // Clear buffer function
+  const clearBuffer = useCallback(() => {
+    setBufferedNotes([]);
+    setLastReceivedAt(null);
+    seenNoteIds.current.clear();
+  }, []);
+
+  // Get buffered notes and clear them
+  const getAndClearBufferedNotes = useCallback((): Note[] => {
+    console.log('🔴 getAndClearBufferedNotes called', {
+      bufferedNotesCount: bufferedNotes.length,
+      noteIds: bufferedNotes.map(n => n.id.slice(0, 8))
+    });
+    const notes = bufferedNotes.slice();
+    console.log('🔴 Clearing buffer after retrieving notes');
+    clearBuffer();
+    return notes;
+  }, [bufferedNotes, clearBuffer]);
+
+  // Auto-clear buffer when user scrolls up (indicates they're reading older content)
+  useScrollDirectionDetection({
+    enabled: autoClearOnScroll && bufferedNotes.length > 0,
+    threshold: 100, // 100px scroll threshold
+    onScrollUp: () => {
+      if (bufferedNotes.length > 0) {
+        console.log('🔄 Auto-clearing new notes buffer due to upward scroll');
+        clearBuffer();
+      }
+    }
+  });
+
+  // Process incoming event and add to buffer if valid
+  const processNewEvent = useCallback((event: Event) => {
+    console.log('🔴 processNewEvent called', {
+      id: event.id.slice(0, 8),
+      alreadySeen: seenNoteIds.current.has(event.id),
+      isMuted: mutedPubkeys.includes(event.pubkey),
+      hasContent: !!(event.content && event.content.trim().length > 0),
+      contentLength: event.content?.length || 0
+    });
+
+    // Skip if we've already seen this note
+    if (seenNoteIds.current.has(event.id)) {
+      console.log('🔴 Skipping - already seen note', event.id.slice(0, 8));
+      return;
+    }
+
+    // Skip if from muted pubkey
+    if (mutedPubkeys.includes(event.pubkey)) {
+      console.log('🔴 Skipping - muted pubkey', event.pubkey.slice(0, 8));
+      return;
+    }
+
+    // Skip if no content
+    if (!event.content || event.content.trim().length === 0) {
+      console.log('🔴 Skipping - no content', event.id.slice(0, 8));
+      return;
+    }
+
+    console.log('🔴 Adding note to buffer', {
+      id: event.id.slice(0, 8),
+      currentBufferSize: bufferedNotes.length,
+      maxBufferSize
+    });
+
+    // Mark as seen
+    seenNoteIds.current.add(event.id);
+
+    // Extract media URLs
+    const imageUrls = extractImageUrls(event.content);
+    const videoUrls = extractVideoUrls(event.content);
+
+    // Create note object
+    const note: Note = {
+      id: event.id,
+      pubkey: event.pubkey,
+      content: event.content,
+      created_at: event.created_at,
+      kind: event.kind || 1,
+      tags: event.tags || [],
+      imageUrls,
+      videoUrls,
+      receivedAt: Date.now()
+    };
+
+    // Add to buffer (most recent first)
+    setBufferedNotes(prev => {
+      const updated = [note, ...prev];
+      console.log('🔴 Buffer updated', {
+        previousSize: prev.length,
+        newSize: updated.length,
+        noteId: note.id.slice(0, 8)
+      });
+      
+      // Enforce max buffer size
+      if (updated.length > maxBufferSize) {
+        const removed = updated.slice(maxBufferSize);
+        console.log('🔴 Trimming buffer', {
+          removedCount: removed.length,
+          finalSize: maxBufferSize
+        });
+        // Remove IDs of discarded notes from seen set
+        removed.forEach(removedNote => {
+          seenNoteIds.current.delete(removedNote.id);
+        });
+        return updated.slice(0, maxBufferSize);
+      }
+      
+      return updated;
+    });
+
+    setLastReceivedAt(Date.now());
+
+    // Call callback if provided
+    if (onNewNoteReceived) {
+      console.log('🔴 Calling onNewNoteReceived callback');
+      onNewNoteReceived(note);
+    }
+  }, [mutedPubkeys, maxBufferSize, onNewNoteReceived, bufferedNotes.length]);
+
+  // Setup real-time subscription logic is now inlined in useEffect below
+    // OLD FUNCTION REMOVED - console.log('🔴 setupSubscription called', {
+      nostrClient: !!nostrClient,
+      enabled,
+      relayCount: relayUrls.length,
+      isClosing: isClosing.current
+    });
+
+    if (!nostrClient) {
+      console.log('🔴 setupSubscription early return - no nostrClient');
+      return;
+    }
+    
+    if (!enabled) {
+      console.log('🔴 setupSubscription early return - not enabled');
+      return;
+    }
+    
+    if (relayUrls.length === 0) {
+      console.log('🔴 setupSubscription early return - no relay URLs');
+      return;
+    }
+    
+    if (isClosing.current) {
+      console.log('🔴 setupSubscription early return - is closing');
+      return;
+    }
+    
+    console.log('🔴 setupSubscription passed all checks, proceeding...');
+
+    try {
+      // Close existing subscription
+      if (subscriptionRef.current) {
+        console.log('🔴 Closing existing subscription');
+        subscriptionRef.current.close();
+        subscriptionRef.current = null;
+      }
+
+      // Build filter for real-time subscription (no until parameter for live feed)
+      const filter = buildFilter();
+      console.log('🔴 Built filter for real-time subscription', filter);
+      
+      // Special handling for follow filter - check if we have authors
+      if (filter.authors && filter.authors.length === 0) {
+        console.log('🔴 Follow filter enabled but no contacts available yet, skipping real-time subscription');
+        setIsConnected(false);
+        return;
+      }
+      
+      // Check if this is a follow-only filter with no authors (means no contacts loaded)
+      if (!filter.authors && filter.kinds && filter.kinds.includes(1) && Object.keys(filter).length <= 3) {
+        // This might be a follow filter with no contacts, let's check if we should skip
+        console.log('🔴 Possible follow filter with no contacts - filter keys:', Object.keys(filter));
+        // For now, let's proceed and see what happens
+      }
+      
+      // Remove limit for real-time subscription to get all new notes
+      const realtimeFilter: Filter = {
+        ...filter,
+        since: Math.floor(Date.now() / 1000) // Only get notes from now forward
+      };
+      delete realtimeFilter.limit; // Remove limit for real-time feed
+
+      console.log('🔴 Setting up real-time feed subscription', {
+        relayUrls,
+        relayCount: relayUrls.length,
+        filter: realtimeFilter,
+        hasAuthors: filter.authors ? filter.authors.length : 0,
+        hasHashtags: filter['#t'] ? filter['#t'].length : 0,
+        sinceTimestamp: new Date(realtimeFilter.since! * 1000).toISOString()
+      });
+
+      const pool = getGlobalRelayPool();
+      console.log('🔴 Got relay pool', { pool: !!pool });
+      
+      console.log('🔴 About to call pool.subscribeMany');
+      const subscription = pool.subscribeMany(relayUrls, [realtimeFilter], {
+        onevent: (event: Event) => {
+          console.log('🔴 Real-time event received', {
+            id: event.id.slice(0, 8),
+            kind: event.kind,
+            pubkey: event.pubkey.slice(0, 8),
+            created_at: event.created_at,
+            content: event.content?.slice(0, 50) + '...',
+            isClosing: isClosing.current
+          });
+          
+          if (isClosing.current) {
+            console.log('🔴 Ignoring event - subscription is closing');
+            return;
+          }
+          
+          // Process the new event
+          processNewEvent(event);
+        },
+        onclose: (reason: string) => {
+          console.log('🔴 Real-time feed subscription closed', { reason });
+          if (!isClosing.current) {
+            setIsConnected(false);
+          }
+        },
+        oneose: () => {
+          console.log('🔴 Real-time feed subscription established (EOSE received)');
+          if (!isClosing.current) {
+            setIsConnected(true);
+          }
+        }
+      });
+
+      console.log('🔴 Subscription created', { subscription: !!subscription });
+      subscriptionRef.current = subscription;
+      console.log('🔴 Subscription stored in ref');
+
+    } catch (error) {
+      console.error('🔴 Failed to setup real-time feed subscription:', error);
+      setIsConnected(false);
+    }
+  */
+  // }, [nostrClient, enabled, relayUrls, buildFilter, processNewEvent, contactsCount]);
+
+  // Setup subscription when dependencies change
+  useEffect(() => {
+    console.log('🔴 useRealtimeFeedNotes useEffect triggered', {
+      enabled,
+      relayCount: relayUrls.length,
+      shouldSetup: enabled && relayUrls.length > 0,
+      isClosing: isClosing.current
+    });
+    
+    // Reset the closing flag when starting a new subscription attempt
+    isClosing.current = false;
+    
+    if (enabled && relayUrls.length > 0) {
+      console.log('🔴 Calling setupSubscription from useEffect');
+      // Call setupSubscription directly to avoid dependency issues
+      (async () => {
+        if (!nostrClient || !enabled || relayUrls.length === 0 || isClosing.current) {
+          if (!nostrClient) {
+            console.log('🔴 setupSubscription early return - no nostrClient');
+            return;
+          }
+          
+          if (!enabled) {
+            console.log('🔴 setupSubscription early return - not enabled');
+            return;
+          }
+          
+          if (relayUrls.length === 0) {
+            console.log('🔴 setupSubscription early return - no relay URLs');
+            return;
+          }
+          
+          if (isClosing.current) {
+            console.log('🔴 setupSubscription early return - is closing');
+            return;
+          }
+        }
+        
+        console.log('🔴 setupSubscription passed all checks, proceeding...');
+
+        try {
+          // Close existing subscription
+          if (subscriptionRef.current) {
+            subscriptionRef.current.close();
+            subscriptionRef.current = null;
+          }
+
+          // Build filter for real-time subscription (no until parameter for live feed)
+          const filter = buildFilter();
+          console.log('🔴 Built filter for real-time subscription', filter);
+          
+          // Special handling for follow filter - check if we have authors
+          if (filter.authors && filter.authors.length === 0) {
+            console.log('🔴 Follow filter enabled but no contacts available yet, skipping real-time subscription');
+            setIsConnected(false);
+            return;
+          }
+          
+          // Check if this might be a follow filter with no contacts
+          if (!filter.authors && Object.keys(filter).length <= 2) {
+            console.log('🔴 Possible follow filter with no contacts - filter keys:', Object.keys(filter));
+            // For now, continue with the subscription as it might be a global feed
+          }
+          
+          // Remove limit for real-time subscription to get all new notes
+          const realtimeFilter = {
+            ...filter,
+            since: Math.floor(Date.now() / 1000) - 5, // Start from 5 seconds ago to catch recent notes
+          };
+          delete realtimeFilter.limit; // Remove limit for real-time feed
+          delete realtimeFilter.until; // Remove until for real-time feed
+          
+          console.log('🔴 Setting up real-time feed subscription', {
+            relayUrls,
+            relayCount: relayUrls.length,
+            filter: realtimeFilter,
+            hasAuthors: filter.authors ? filter.authors.length : 0,
+            hasHashtags: filter['#t'] ? filter['#t'].length : 0,
+            sinceTimestamp: new Date(realtimeFilter.since! * 1000).toISOString()
+          });
+
+          const pool = getGlobalRelayPool();
+          console.log('🔴 Got relay pool', { pool: !!pool });
+          
+          console.log('🔴 About to call pool.subscribeMany');
+          const subscription = pool.subscribeMany(relayUrls, [realtimeFilter], {
+            onevent: (event: Event) => {
+              console.log('🔴 Real-time event received', {
+                id: event.id.slice(0, 8),
+                kind: event.kind,
+                pubkey: event.pubkey.slice(0, 8),
+                created_at: event.created_at,
+                content: event.content.slice(0, 50) + '...',
+                isClosing: isClosing.current
+              });
+              if (isClosing.current) return;
+              
+              // Process the new event
+              processNewEvent(event);
+            },
+            onclose: (reason: any) => {
+              if (!isClosing.current) {
+                console.log('🔴 Real-time feed subscription closed', { reason });
+                setIsConnected(false);
+              }
+            },
+            oneose: () => {
+              if (!isClosing.current) {
+                console.log('🔴 Real-time feed subscription established (EOSE received)');
+                setIsConnected(true);
+              }
+            }
+          });
+
+          console.log('🔴 Subscription created', { subscription: !!subscription });
+          subscriptionRef.current = subscription;
+          console.log('🔴 Subscription stored in ref');
+
+        } catch (error) {
+          console.error('🔴 Failed to setup real-time feed subscription:', error);
+          setIsConnected(false);
+        }
+      })();
+    } else {
+      console.log('🔴 Cleaning up subscription - not enabled or no relays');
+      // Clean up when disabled
+      if (subscriptionRef.current) {
+        console.log('🔴 Closing existing subscription in cleanup');
+        subscriptionRef.current.close();
+        subscriptionRef.current = null;
+      }
+      setIsConnected(false);
+    }
+
+    return () => {
+      console.log('🔴 useRealtimeFeedNotes cleanup function called');
+      isClosing.current = true;
+      if (subscriptionRef.current) {
+        subscriptionRef.current.close();
+        subscriptionRef.current = null;
+      }
+      setIsConnected(false);
+    };
+  }, [enabled, relayUrls, nostrClient, contactsCount]);
+
+  // Clean up on unmount
+  useEffect(() => {
+    return () => {
+      isClosing.current = true;
+      if (subscriptionRef.current) {
+        subscriptionRef.current.close();
+        subscriptionRef.current = null;
+      }
+    };
+  }, []);
+
+  // Reset buffer when filter changes (detected by buildFilter reference change)
+  useEffect(() => {
+    clearBuffer();
+  }, [buildFilter, clearBuffer]);
+
+  // Debug logging for the hook state
+  React.useEffect(() => {
+    console.log(`🔴 useRealtimeFeedNotes: State update`, {
+      newNotesCount: bufferedNotes.length,
+      isConnected,
+      enabled,
+      relayCount: relayUrls.length,
+      lastReceivedAt: lastReceivedAt ? new Date(lastReceivedAt).toISOString() : null
+    });
+  }, [bufferedNotes.length, isConnected, enabled, relayUrls.length, lastReceivedAt]);
+
+  return {
+    newNotesCount: bufferedNotes.length,
+    bufferedNotes,
+    clearBuffer,
+    getAndClearBufferedNotes,
+    isConnected,
+    lastReceivedAt
+  };
+}

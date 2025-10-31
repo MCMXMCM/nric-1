@@ -1,0 +1,51 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 1024" width="1200" height="1024">
+  <defs>
+    <mask id="stripeMask" maskUnits="userSpaceOnUse" x="0" y="0" width="1200" height="1024">
+      <rect x="0" y="0" width="1200" height="1024" fill="black"/>
+      <g fill="white">
+        <!-- evenly spaced horizontal stripes -->
+        <!-- adjust stripe height/gap to taste -->
+        <rect x="0" y="120" width="1200" height="18"/>
+        <rect x="0" y="148" width="1200" height="18"/>
+        <rect x="0" y="176" width="1200" height="18"/>
+        <rect x="0" y="204" width="1200" height="18"/>
+        <rect x="0" y="232" width="1200" height="18"/>
+        <rect x="0" y="260" width="1200" height="18"/>
+        <rect x="0" y="288" width="1200" height="18"/>
+        <rect x="0" y="316" width="1200" height="18"/>
+        <rect x="0" y="344" width="1200" height="18"/>
+        <rect x="0" y="372" width="1200" height="18"/>
+        <rect x="0" y="400" width="1200" height="18"/>
+        <rect x="0" y="428" width="1200" height="18"/>
+        <rect x="0" y="456" width="1200" height="18"/>
+        <rect x="0" y="484" width="1200" height="18"/>
+        <rect x="0" y="512" width="1200" height="18"/>
+        <rect x="0" y="540" width="1200" height="18"/>
+        <rect x="0" y="568" width="1200" height="18"/>
+        <rect x="0" y="596" width="1200" height="18"/>
+        <rect x="0" y="624" width="1200" height="18"/>
+        <rect x="0" y="652" width="1200" height="18"/>
+        <rect x="0" y="680" width="1200" height="18"/>
+        <rect x="0" y="708" width="1200" height="18"/>
+        <rect x="0" y="736" width="1200" height="18"/>
+        <rect x="0" y="764" width="1200" height="18"/>
+        <rect x="0" y="792" width="1200" height="18"/>
+        <rect x="0" y="820" width="1200" height="18"/>
+        <rect x="0" y="848" width="1200" height="18"/>
+      </g>
+    </mask>
+  </defs>
+
+  <!-- Light mode text with black color -->
+  <g mask="url(#stripeMask)">
+    <text x="50%" y="58%"
+          text-anchor="middle"
+          font-family="Arial, Helvetica, sans-serif"
+          font-weight="900"
+          font-size="360"
+          letter-spacing="0"
+          fill="#000000">
+      NRIC-1
+    </text>
+  </g>
+</svg>
