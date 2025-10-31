@@ -2,6 +2,10 @@
 
 **Note Relay Interlink Client** (pronounced: "en-rick") is a specialized Nostr client for the user who wants to be "on the road" not "in the car" when driving software. Inspired by the golden years of computing when less wasn't more and users wanted control.
 
+### Try it out
+
+[https://nric-1.com](https://nric-1.com)
+
 ## At a Glance
 
 - **Stay Focused:** Media is tolerated, but not given primacy. Don't let media highjack your monkey brain. ASCII and no-color mode help keep you focused and in the driver's seat.
