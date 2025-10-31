@@ -888,14 +888,15 @@ const AboutPage: React.FC = () => {
             protocol specifications.
             <br />
             For the latest updates and source code, visit the{" "}
-            {/* <a
-              href="https://github.com/fiatjaf/nric"
+            <a
+              href="https://github.com/MCMXMCM/nric-1"
               target="_blank"
               rel="noopener noreferrer"
               style={{ color: "var(--link-color)" }}
-            > */}
-            project repository
-            {/* </a> */}.
+            >
+              project repository
+            </a>
+            .
           </p>
         </div>
       </div>
