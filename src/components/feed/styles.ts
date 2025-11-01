@@ -125,7 +125,23 @@ export const feedStyles = {
     textAlign: 'left' as const,
     whiteSpace: 'nowrap' as const,
     minWidth: '80px'
-  }
+  },
+
+  // Filter indicators container with horizontal scrolling
+  filterIndicatorsContainer: (isMobile: boolean) => ({
+    display: 'flex',
+    gap: '0.5rem',
+    paddingRight: '0.5rem',
+    alignItems: 'center',
+    justifyContent: 'start',
+    flexWrap: isMobile ? 'nowrap' as const : 'wrap' as const,
+    flex: 1,
+    marginLeft: isMobile ? '0.5rem' : '0',
+    overflowX: isMobile ? 'auto' as const : 'visible' as const,
+    overflowY: 'visible' as const,
+    scrollbarWidth: 'none' as const, // Firefox
+    msOverflowStyle: 'none' as const, // IE/Edge
+  })
 };
 
 // Utility functions for dynamic styles

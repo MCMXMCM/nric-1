@@ -118,6 +118,17 @@ export default defineConfig({
         },
       },
     },
+    minify: 'terser',
+    terserOptions: {
+      compress: {
+        drop_console: false,
+      },
+      mangle: true,
+      output: {
+        comments: false,
+      },
+      maxWorkers: 1,
+    },
   },
   test: {
     globals: true,

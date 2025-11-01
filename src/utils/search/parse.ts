@@ -57,8 +57,36 @@ export function parseSearchInput(inputRaw: string): ParseResult {
     return { type: "nip05", subtype: "nip05", input };
   }
 
-  // Bech32 types
-  if (/^(npub|nprofile|note|nevent)1[ac-hj-np-z02-9]+$/i.test(input)) {
+  // Check for nevent prefix first (even if not valid bech32)
+  if (input.toLowerCase().startsWith("nevent")) {
+    try {
+      const decoded = nip19.decode(input) as any;
+      if (decoded.type === "nevent" && decoded.data?.id) {
+        const relays: string[] = Array.isArray(decoded.data.relays)
+          ? decoded.data.relays.filter((r: any) => typeof r === "string")
+          : [];
+        return {
+          type: "note",
+          subtype: "nevent",
+          input,
+          noteIdHex: decoded.data.id as string,
+          relayHints: relays,
+        };
+      }
+    } catch {
+      // Invalid nevent format
+    }
+    // Invalid nevent but still classify as note search
+    return {
+      type: "note",
+      subtype: "nevent",
+      input,
+      noteIdHex: undefined, // Invalid nevent, no hex ID
+    };
+  }
+
+  // Other Bech32 types
+  if (/^(npub|nprofile|note)1[ac-hj-np-z02-9]+$/i.test(input)) {
     try {
       const decoded = nip19.decode(input) as any;
       if (decoded.type === "npub" && typeof decoded.data === "string") {
@@ -89,18 +117,6 @@ export function parseSearchInput(inputRaw: string): ParseResult {
           subtype: "note",
           input,
           noteIdHex: decoded.data,
-        };
-      }
-      if (decoded.type === "nevent" && decoded.data?.id) {
-        const relays: string[] = Array.isArray(decoded.data.relays)
-          ? decoded.data.relays.filter((r: any) => typeof r === "string")
-          : [];
-        return {
-          type: "note",
-          subtype: "nevent",
-          input,
-          noteIdHex: decoded.data.id as string,
-          relayHints: relays,
         };
       }
     } catch {

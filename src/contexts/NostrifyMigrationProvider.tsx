@@ -52,7 +52,9 @@ export const NostrifyMigrationProvider: React.FC<
   const pool = useRef<NPool | undefined>(undefined);
   const [isMigrating] = useState(false);
   const [poolReady, setPoolReady] = useState(false);
+  const [poolVersion, setPoolVersion] = useState(0);
   const [resetCounter, setResetCounter] = useState(0);
+  const cancelTokenRef = useRef<number>(0);
 
   // Get legacy context to access pubkey
   const legacyContext = useContext(LegacyNostrContext);
@@ -118,6 +120,17 @@ export const NostrifyMigrationProvider: React.FC<
     }
 
     // Clean up old pool if it exists
+    // Mark pool as not ready immediately to gate new queries during transition
+    setPoolReady(false);
+    try {
+      // Notify listeners that the pool is being reset so they can cancel/refetch
+      window.dispatchEvent(new CustomEvent('nostrifyPoolReset'));
+    } catch {}
+
+    // Bump pool version and cancel token to invalidate any in-flight results started before reset
+    setPoolVersion((v) => v + 1);
+    cancelTokenRef.current = (cancelTokenRef.current + 1) % Number.MAX_SAFE_INTEGER;
+
     if (pool.current) {
       if (import.meta.env.DEV) {
         console.log("🧹 Cleaning up old Nostrify pool");
@@ -138,35 +151,34 @@ export const NostrifyMigrationProvider: React.FC<
         if (!g.__nostrifyReqCounter) g.__nostrifyReqCounter = 0;
 
         // Global concurrency limiter (semaphore)
-        if (!g.__nostrifyQuerySemaphore) {
-          g.__nostrifyQuerySemaphore = {
-            max: 6,
-            inFlight: 0,
-            queue: [] as Array<() => void>,
-            acquire(cb: () => Promise<any>) {
-              return new Promise((resolve, reject) => {
-                const run = async () => {
-                  this.inFlight++;
-                  try {
-                    const res = await cb();
-                    resolve(res);
-                  } catch (e) {
-                    reject(e);
-                  } finally {
-                    this.inFlight--;
-                    const next = this.queue.shift();
-                    if (next) next();
-                  }
-                };
-                if (this.inFlight < this.max) {
-                  run();
-                } else {
-                  this.queue.push(run);
+        // Always recreate on pool init to clear any queued stale tasks
+        g.__nostrifyQuerySemaphore = {
+          max: 6,
+          inFlight: 0,
+          queue: [] as Array<() => void>,
+          acquire(cb: () => Promise<any>) {
+            return new Promise((resolve, reject) => {
+              const run = async () => {
+                this.inFlight++;
+                try {
+                  const res = await cb();
+                  resolve(res);
+                } catch (e) {
+                  reject(e);
+                } finally {
+                  this.inFlight--;
+                  const next = this.queue.shift();
+                  if (next) next();
                 }
-              });
-            },
-          };
-        }
+              };
+              if (this.inFlight < this.max) {
+                run();
+              } else {
+                this.queue.push(run);
+              }
+            });
+          },
+        };
 
         // Recreate pool when relay configuration changes
         pool.current = new NPool({
@@ -359,16 +371,26 @@ export const NostrifyMigrationProvider: React.FC<
                 ? gHints.__nostrifyRelayHintQueue.shift()
                 : undefined;
             if (Array.isArray(hinted) && hinted.length > 0) {
-              const preferred = hinted.filter((u) =>
-                readableRelays.includes(u)
+              // Use hinted relays directly (even if not in configured list)
+              // to allow targeted lookups against public/indexer relays
+              const normalized = Array.from(
+                new Set(
+                  hinted.map((u) => {
+                    try {
+                      return new URL(u).toString().replace(/\/$/, "").toLowerCase();
+                    } catch {
+                      return String(u).replace(/\/$/, "").toLowerCase();
+                    }
+                  })
+                )
               );
-              if (preferred.length > 0) {
+
+              const toUse = normalized.slice(0, 4);
+              if (toUse.length > 0) {
                 if (import.meta.env.DEV) {
-                  console.log("🎯 Using relay hints in reqRouter fallback:", {
-                    preferred,
-                  });
+                  console.log("🎯 Using relay hints in reqRouter:", { relays: toUse });
                 }
-                return new Map(preferred.map((url) => [url, filters]));
+                return new Map(toUse.map((url) => [url, filters]));
               }
             }
 
@@ -506,11 +528,22 @@ export const NostrifyMigrationProvider: React.FC<
             if (!pool.current) {
               throw new Error("Nostrify pool not initialized");
             }
-
+            // Capture version to invalidate results if pool resets mid-flight
+            const currentVersion = poolVersion;
+            // Capture cancel token to detect resets across stale closures
+            const currentTokenAtStart = cancelTokenRef.current;
+            if (!poolReady) {
+              throw new Error("Nostrify pool not ready");
+            }
             try {
-              return await g.__nostrifyQuerySemaphore.acquire(() =>
+              const result = await g.__nostrifyQuerySemaphore.acquire(() =>
                 pool.current!.query(filters)
               );
+              // If pool reset happened during query, drop stale result
+              if (currentVersion !== poolVersion || currentTokenAtStart !== cancelTokenRef.current) {
+                throw new Error("Nostrify pool reset during query");
+              }
+              return result;
             } catch (error) {
               console.error("❌ Nostrify pool query failed:", error);
               throw error;
@@ -587,13 +620,25 @@ export const NostrifyMigrationProvider: React.FC<
                       });
                     }
 
-                    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-                    return (globalThis as any).__nostrifyQuerySemaphore
-                      ? // eslint-disable-next-line @typescript-eslint/no-explicit-any
-                        (globalThis as any).__nostrifyQuerySemaphore.acquire(
-                          () => (pool.current as any).query(filters)
-                        )
-                      : (pool.current as any).query(filters);
+                      if (!poolReady || !pool.current) {
+                        throw new Error("Nostrify pool not ready");
+                      }
+                      const g: any = globalThis as any;
+                      const currentVersion = poolVersion;
+                      const currentTokenAtStart = cancelTokenRef.current;
+                      const run = async () => {
+                        const res = await (pool.current as any).query(filters);
+                        if (
+                          currentVersion !== poolVersion ||
+                          currentTokenAtStart !== cancelTokenRef.current
+                        ) {
+                          throw new Error("Nostrify pool reset during query");
+                        }
+                        return res;
+                      };
+                      return g.__nostrifyQuerySemaphore
+                        ? g.__nostrifyQuerySemaphore.acquire(run)
+                        : run();
                   },
                 }
               : undefined,

@@ -1171,17 +1171,8 @@ const NostrifyFeedMigration: React.FC = () => {
     }
   };
 
-  // Get display name for pubkey using Nostrify metadata
-  const getDisplayNameForPubkey = useCallback(
-    (pubkey: string) => {
-      const metadata = metadataMap.get(pubkey);
-      if (metadata?.display_name) return metadata.display_name;
-      if (metadata?.name) return metadata.name;
-      if (metadata?.nip05) return metadata.nip05;
-      return pubkey.slice(0, 8) + "..."; // Fallback to truncated pubkey
-    },
-    [metadataMap]
-  );
+  // Use unified display name resolver from thread/feed setup
+  const getDisplayNameForPubkey = setup.getDisplayNameForPubkey;
 
   // Render individual note with focus support (unused with VirtualizedFeed)
 

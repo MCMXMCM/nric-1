@@ -229,6 +229,11 @@ const SearchPageComponent: React.FC = () => {
             } else if (parsed.subtype === "nevent" && parsed.noteIdHex) {
               hexId = parsed.noteIdHex;
               hintTags = parsed.relayHints;
+            } else if (parsed.subtype === "nevent" && !parsed.noteIdHex) {
+              // Invalid nevent - show "Note not found" instead of text search
+              setNotesResults([]);
+              setNotesError("Invalid nevent format");
+              return;
             } else if (
               parsed.type === "ambiguous_hex" &&
               parsed.input &&

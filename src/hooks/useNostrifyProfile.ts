@@ -60,13 +60,25 @@ export function useNostrifyProfileMetadata(config: UseNostrifyProfileMetadataCon
 
   const query = useQuery({
     queryKey: ['nostrify-profile-metadata', pubkeyHex, relayUrls],
-    enabled: enabled && !!pubkeyHex && !!nostr && relayUrls.length > 0,
+    enabled: enabled && !!pubkeyHex && relayUrls.length > 0,
     queryFn: async () => {
+      // If Nostrify is not ready/available, use phased fallback directly
       if (!nostr) {
-        console.warn('⚠️ Nostrify not available for metadata query');
-        throw new Error('Nostrify not available');
+        try {
+          const { getCachedOutboxRelaysForProfile } = await import('../utils/outboxIntegration');
+          const outboxRelays = await getCachedOutboxRelaysForProfile(pubkeyHex);
+          const blendedRelays = outboxRelays.length > 0 
+            ? [...outboxRelays.slice(0, 5), ...relayUrls.slice(0, 2)]
+            : relayUrls;
+          const { fetchUserMetadata } = await import('../utils/profileMetadataUtils');
+          const result = await fetchUserMetadata({ pubkeyHex, relayUrls: blendedRelays, useOutboxRelays: true });
+          return result.metadata || null;
+        } catch (fallbackErr) {
+          console.warn('⚠️ Metadata fallback (no Nostrify) failed:', fallbackErr);
+          return null;
+        }
       }
-      
+
       try {
         // Get cached outbox relays for this user (fast)
         const { getCachedOutboxRelaysForProfile } = await import('../utils/outboxIntegration');
@@ -90,11 +102,18 @@ export function useNostrifyProfileMetadata(config: UseNostrifyProfileMetadataCon
         const recentFailures = (globalThis as any).__nostrifyRecentFailures || 0;
         const timeoutMs = recentFailures > 2 ? 5000 : 12000; // Prevent indefinite hangs on slow/unresponsive relays
 
-        const queryPromise = nostr.query([{
-          kinds: [0],
-          authors: [pubkeyHex],
-          limit: 1
-        }]);
+        let queryPromise: Promise<NostrEvent[]>;
+        try {
+          queryPromise = nostr.query([{
+            kinds: [0],
+            authors: [pubkeyHex],
+            limit: 1
+          }]);
+        } catch (e: any) {
+          // Handle synchronous throw (e.g., pool not ready)
+          console.warn('⚠️ Nostrify query threw before awaiting, falling back:', e);
+          queryPromise = Promise.resolve([] as NostrEvent[]);
+        }
         const timeoutPromise = new Promise<never>((_, reject) =>
           setTimeout(() => reject(new Error('Metadata query timeout')), timeoutMs)
         );
@@ -184,25 +203,30 @@ export function useNostrifyMultipleProfileMetadata(config: {
     queryKey: ['nostrify-multiple-profile-metadata', pubkeys, relayUrls],
     enabled: enabled && pubkeys.length > 0,
     queryFn: async () => {
-      if (!nostr) throw new Error('Nostrify not available');
-      
       // Acquire throttle slot for metadata queries
       const slotId = await acquireQuerySlot('metadata');
       
       try {
-        // Add timeout protection (8 seconds for batch metadata)
-        const timeoutMs = 8000;
-        const queryPromise = nostr.query([{
-          kinds: [0],
-          authors: pubkeys,
-          limit: pubkeys.length
-        }]);
-        const timeoutPromise = new Promise<never>((_, reject) => 
-          setTimeout(() => reject(new Error('Metadata query timeout')), timeoutMs)
-        );
-        
-        // Phase 1: Try with Nostrify pool
-        let events = await Promise.race([queryPromise, timeoutPromise]).catch(() => []);
+        let events: NostrEvent[] = [];
+        if (nostr) {
+          // Add timeout protection (8 seconds for batch metadata)
+          const timeoutMs = 8000;
+          let queryPromise: Promise<NostrEvent[]>;
+          try {
+            queryPromise = nostr.query([{
+              kinds: [0],
+              authors: pubkeys,
+              limit: pubkeys.length
+            }]);
+          } catch {
+            queryPromise = Promise.resolve([] as NostrEvent[]);
+          }
+          const timeoutPromise = new Promise<never>((_, reject) => 
+            setTimeout(() => reject(new Error('Metadata query timeout')), timeoutMs)
+          );
+          // Phase 1: Try with Nostrify pool
+          events = await Promise.race([queryPromise, timeoutPromise]).catch(() => []);
+        }
         
         // Phase 2: If no events, use phased fallback from profileMetadataUtils
         if (events.length === 0) {
@@ -315,8 +339,6 @@ export function useNostrifyProfileContacts(config: {
     queryKey: ['nostrify-profile-contacts', pubkeyHex, mode, relayUrls],
     enabled: enabled && !!pubkeyHex,
     queryFn: async () => {
-      if (!nostr) throw new Error('Nostrify not available');
-      
       let filter: any;
       
       if (mode === 'following') {
@@ -332,13 +354,34 @@ export function useNostrifyProfileContacts(config: {
           limit: 5000
         };
       }
-      
-      const events = await nostr.query([filter]);
+
+      // Try Nostrify first when available, else legacy pool fallback
+      let events: any[] = [];
+      if (nostr) {
+        try {
+          events = await nostr.query([filter]);
+        } catch (e) {
+          events = [];
+        }
+      }
+
+      if (!events || events.length === 0) {
+        try {
+          const { getGlobalRelayPool } = await import('../utils/nostr/relayConnectionPool');
+          const pool = getGlobalRelayPool();
+          const relaysToUse = relayUrls && relayUrls.length > 0 ? relayUrls : [];
+          if (relaysToUse.length > 0) {
+            events = await pool.querySync(relaysToUse, filter);
+          }
+        } catch (fallbackErr) {
+          console.warn('⚠️ Contacts fallback failed:', fallbackErr);
+        }
+      }
       
       if (mode === 'following') {
         const latest = events.sort((a, b) => b.created_at - a.created_at)[0];
-        const pTags = (latest?.tags || []).filter((t) => t[0] === 'p' && t[1]);
-        return pTags.map((t) => t[1]);
+        const pTags = (latest?.tags || []).filter((t: string[]) => t[0] === 'p' && t[1]);
+        return pTags.map((t: string[]) => t[1]);
       } else {
         return Array.from(new Set(events.map((ev) => ev.pubkey)));
       }

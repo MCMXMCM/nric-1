@@ -258,6 +258,15 @@ export function useNostrifyFeed(config: UseNostrifyFeedConfig): UseNostrifyFeedR
         console.error('❌ Nostrify pool not available after waiting');
         throw new Error('Nostrify pool not available after timeout');
       }
+
+      // Push per-query relay hints so the pool routes exactly where the UI selected
+      try {
+        const g: any = globalThis as any;
+        if (Array.isArray(relayUrls) && relayUrls.length > 0) {
+          if (!Array.isArray(g.__nostrifyRelayHintQueue)) g.__nostrifyRelayHintQueue = [];
+          g.__nostrifyRelayHintQueue.push(relayUrls);
+        }
+      } catch {}
       
       if (!relayUrls || relayUrls.length === 0) {
         console.warn('⚠️ No relay URLs configured');

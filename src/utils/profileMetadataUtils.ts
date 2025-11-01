@@ -131,6 +131,14 @@ export const fetchUserMetadata = async (
         }
       } catch (error) {
         console.warn('Phase 1 (outbox) failed:', error);
+        // Fallback to legacy pool if Nostrify is present but not ready
+        try {
+          const { getGlobalRelayPool } = await import('./nostr/relayConnectionPool');
+          const pool = getGlobalRelayPool();
+          const outboxEvents = await pool.querySync(outboxRelays, filter as Filter);
+          allEvents.push(...outboxEvents);
+          console.log(`✅ Phase 1 (fallback): Found ${outboxEvents.length} events from outbox relays`);
+        } catch {}
       }
     }
 
@@ -141,6 +149,11 @@ export const fetchUserMetadata = async (
       
       try {
         if (nostrifyPool) {
+          // Hint the pool to use the author's configured primary relays
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const gh: any = globalThis as any;
+          if (!Array.isArray(gh.__nostrifyRelayHintQueue)) gh.__nostrifyRelayHintQueue = [];
+          gh.__nostrifyRelayHintQueue.push(primaryRelays);
           // Add timeout to prevent hanging on failed connections
           const queryPromise = nostrifyPool.query([filter as NostrFilter]);
           const timeoutPromise = new Promise<never>((_, reject) => 
@@ -158,12 +171,16 @@ export const fetchUserMetadata = async (
         }
       } catch (error) {
         console.warn('Phase 1b failed:', error);
-        // Record metadata failures separately from feed failures
-        if (typeof window !== 'undefined' && (window as any).__relayHealthMonitor) {
-          primaryRelays.forEach(relay => {
-            (window as any).__relayHealthMonitor.recordFailure(relay, 'metadata');
-          });
-        }
+        // Record metadata failures for the primary relays we attempted
+        primaryRelays.forEach(relay => recordRelayFailure(relay, 'metadata'));
+        // Fallback to legacy pool if Nostrify is present but not ready
+        try {
+          const { getGlobalRelayPool } = await import('./nostr/relayConnectionPool');
+          const pool = getGlobalRelayPool();
+          const primaryEvents = await pool.querySync(primaryRelays, filter as Filter);
+          allEvents.push(...primaryEvents);
+          console.log(`✅ Phase 1b (fallback): Found ${primaryEvents.length} events from configured relays`);
+        } catch {}
       }
     }
 
@@ -176,6 +193,11 @@ export const fetchUserMetadata = async (
       try {
         const startTime = Date.now();
         if (nostrifyPool) {
+          // Hint the pool to use the selected healthy fallback relays
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const gh: any = globalThis as any;
+          if (!Array.isArray(gh.__nostrifyRelayHintQueue)) gh.__nostrifyRelayHintQueue = [];
+          gh.__nostrifyRelayHintQueue.push(healthyFallbackRelays);
           // Add timeout to prevent hanging on failed connections
           const queryPromise = nostrifyPool.query([filter as NostrFilter]);
           const timeoutPromise = new Promise<never>((_, reject) => 
@@ -203,45 +225,64 @@ export const fetchUserMetadata = async (
         }
       } catch (error) {
         console.warn('Phase 2 failed:', error);
+        // Fallback to legacy pool if Nostrify is present but not ready
+        if (allEvents.length === 0) {
+          try {
+            const { getGlobalRelayPool } = await import('./nostr/relayConnectionPool');
+            const pool = getGlobalRelayPool();
+            const fallbackEvents = await pool.querySync(healthyFallbackRelays, filter as Filter);
+            allEvents.push(...fallbackEvents);
+            console.log(`✅ Phase 2 (fallback): Found ${fallbackEvents.length} events from fallback relays`);
+            const responseTime = 0;
+            healthyFallbackRelays.forEach((relay) => recordRelaySuccess(relay, responseTime));
+          } catch {}
+        }
         
-        // Record failure for all healthy relays that were tried
+        // Record failure for the fallback relays we attempted
         healthyFallbackRelays.forEach(relay => recordRelayFailure(relay, 'metadata'));
         
         // If all fallback relays fail, try a smaller subset of most reliable ones
-        console.log(`🔄 Metadata Phase 2b: Trying most reliable fallback relays for ${pubkeyHex.slice(0, 8)}...`);
-        try {
-          const reliableRelays = getHealthyFallbackRelays(METADATA_FALLBACK_RELAYS.slice(0, 4), 4);
-          const startTime = Date.now();
-          if (nostrifyPool) {
-            // Add timeout to prevent hanging on failed connections
-            const queryPromise = nostrifyPool.query([filter as NostrFilter]);
-            const timeoutPromise = new Promise<never>((_, reject) => 
-              setTimeout(() => reject(new Error('Reliable relay timeout')), RELAY_TIMEOUT / 2)
-            );
-            const reliableEvents = await Promise.race([queryPromise, timeoutPromise]);
-            const responseTime = Date.now() - startTime;
-            allEvents.push(...reliableEvents);
-            console.log(`✅ Phase 2b: Found ${reliableEvents.length} events from reliable relays (${responseTime}ms)`);
-            reliableRelays.forEach((relay) => recordRelaySuccess(relay, responseTime));
-          } else {
-            const { getGlobalRelayPool } = await import('./nostr/relayConnectionPool');
-            const pool = getGlobalRelayPool();
-            const reliableEvents = await Promise.race([
-              pool.querySync(reliableRelays, filter as Filter),
-              new Promise<never>((_, reject) => 
+        if (allEvents.length === 0) {
+          console.log(`🔄 Metadata Phase 2b: Trying most reliable fallback relays for ${pubkeyHex.slice(0, 8)}...`);
+          try {
+            const reliableRelays = getHealthyFallbackRelays(METADATA_FALLBACK_RELAYS.slice(0, 4), 4);
+            const startTime = Date.now();
+            if (nostrifyPool) {
+              // Hint the pool to use the reliable relays directly
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              const gh: any = globalThis as any;
+              if (!Array.isArray(gh.__nostrifyRelayHintQueue)) gh.__nostrifyRelayHintQueue = [];
+              gh.__nostrifyRelayHintQueue.push(reliableRelays);
+              // Add timeout to prevent hanging on failed connections
+              const queryPromise = nostrifyPool.query([filter as NostrFilter]);
+              const timeoutPromise = new Promise<never>((_, reject) => 
                 setTimeout(() => reject(new Error('Reliable relay timeout')), RELAY_TIMEOUT / 2)
-              )
-            ]);
-            const responseTime = Date.now() - startTime;
-            allEvents.push(...reliableEvents);
-            console.log(`✅ Phase 2b: Found ${reliableEvents.length} events from reliable relays (${responseTime}ms)`);
-            reliableRelays.forEach((relay) => recordRelaySuccess(relay, responseTime));
+              );
+              const reliableEvents = await Promise.race([queryPromise, timeoutPromise]);
+              const responseTime = Date.now() - startTime;
+              allEvents.push(...reliableEvents);
+              console.log(`✅ Phase 2b: Found ${reliableEvents.length} events from reliable relays (${responseTime}ms)`);
+              reliableRelays.forEach((relay) => recordRelaySuccess(relay, responseTime));
+            } else {
+              const { getGlobalRelayPool } = await import('./nostr/relayConnectionPool');
+              const pool = getGlobalRelayPool();
+              const reliableEvents = await Promise.race([
+                pool.querySync(reliableRelays, filter as Filter),
+                new Promise<never>((_, reject) => 
+                  setTimeout(() => reject(new Error('Reliable relay timeout')), RELAY_TIMEOUT / 2)
+                )
+              ]);
+              const responseTime = Date.now() - startTime;
+              allEvents.push(...reliableEvents);
+              console.log(`✅ Phase 2b: Found ${reliableEvents.length} events from reliable relays (${responseTime}ms)`);
+              reliableRelays.forEach((relay) => recordRelaySuccess(relay, responseTime));
+            }
+          } catch (reliableError) {
+            console.warn('Phase 2b failed:', reliableError);
+            // Record failure for reliable relays
+            const reliableRelays = getHealthyFallbackRelays(METADATA_FALLBACK_RELAYS.slice(0, 4), 4);
+            reliableRelays.forEach(relay => recordRelayFailure(relay, 'metadata'));
           }
-        } catch (reliableError) {
-          console.warn('Phase 2b failed:', reliableError);
-          // Record failure for reliable relays
-          const reliableRelays = getHealthyFallbackRelays(METADATA_FALLBACK_RELAYS.slice(0, 4), 4);
-          reliableRelays.forEach(relay => recordRelayFailure(relay, 'metadata'));
         }
       }
     }
@@ -253,6 +294,11 @@ export const fetchUserMetadata = async (
       try {
         let phase3Events: Array<NostrEvent | Event> = [];
         if (nostrifyPool) {
+          // Hint the pool to use any explicitly provided extra relays
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const gh: any = globalThis as any;
+          if (!Array.isArray(gh.__nostrifyRelayHintQueue)) gh.__nostrifyRelayHintQueue = [];
+          gh.__nostrifyRelayHintQueue.push(extraRelays);
           // Add timeout to prevent hanging on failed connections
           const queryPromise = nostrifyPool.query([filter as NostrFilter]);
           const timeoutPromise = new Promise<never>((_, reject) => 
@@ -268,6 +314,14 @@ export const fetchUserMetadata = async (
         console.log(`✅ Phase 3: Found ${phase3Events.length} events from extra relays`);
       } catch (error) {
         console.warn('Phase 3 failed:', error);
+        // Fallback to legacy pool if Nostrify is present but not ready
+        try {
+          const { getGlobalRelayPool } = await import('./nostr/relayConnectionPool');
+          const pool = getGlobalRelayPool();
+          const phase3Events = await pool.querySync(extraRelays, filter as Filter);
+          allEvents.push(...(phase3Events as Array<NostrEvent | Event>));
+          console.log(`✅ Phase 3 (fallback): Found ${phase3Events.length} events from extra relays`);
+        } catch {}
       }
     }
 

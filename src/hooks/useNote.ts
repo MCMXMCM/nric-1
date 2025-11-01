@@ -65,20 +65,28 @@ export function useNote({
 
       try {
         let events: Array<NostrEvent | Event> = []
-        if (nostrifyPool) {
-          events = await nostrifyPool.query([filter])
-        } else {
-          events = await pool.querySync(augmentedRelays, filter as unknown as Filter)
+
+        const queryWithFallback = async (relaysToUse: string[]) => {
+          if (nostrifyPool) {
+            try {
+              return await nostrifyPool.query([filter])
+            } catch (e: any) {
+              if (typeof e?.message === 'string' && e.message.includes('Nostrify pool not ready')) {
+                // Fall back to legacy pool when Nostrify exists but isn't ready yet
+                return await pool.querySync(relaysToUse, filter as unknown as Filter)
+              }
+              throw e
+            }
+          }
+          return await pool.querySync(relaysToUse, filter as unknown as Filter)
         }
+
+        events = await queryWithFallback(augmentedRelays)
 
         // If no events found with augmented relays, try with original relays only
         if (events.length === 0 && augmentedRelays.length !== relayUrls.length) {
           console.log(`🔄 Retrying note fetch with original relays only`)
-          if (nostrifyPool) {
-            events = await nostrifyPool.query([filter])
-          } else {
-            events = await pool.querySync(relayUrls, filter as unknown as Filter)
-          }
+          events = await queryWithFallback(relayUrls)
         }
 
         // If still no events, optionally try with popular relays as fallback
@@ -94,11 +102,7 @@ export function useNote({
             'wss://purplepag.es',
             'wss://relay.nostr.band'
           ]
-          if (nostrifyPool) {
-            events = await nostrifyPool.query([filter])
-          } else {
-            events = await pool.querySync(popularRelays, filter as unknown as Filter)
-          }
+          events = await queryWithFallback(popularRelays)
         }
 
         if (events.length === 0) {

@@ -26,6 +26,30 @@ export const FilterIndicators: React.FC<FilterIndicatorsProps> = ({
   const hasActiveFilters =
     !showReplies || !showReposts || customHashtags.length > 0 || longFormMode;
 
+  // Add WebKit scrollbar styles for mobile horizontal scrolling
+  React.useEffect(() => {
+    if (isMobile) {
+      const styleId = 'filter-indicators-scrollbar-styles';
+      if (!document.getElementById(styleId)) {
+        const style = document.createElement('style');
+        style.id = styleId;
+        style.textContent = `
+          .filter-indicators-container::-webkit-scrollbar {
+            width: 0px;
+            background: transparent;
+          }
+          .filter-indicators-container::-webkit-scrollbar-thumb {
+            background: transparent;
+          }
+          .filter-indicators-container::-webkit-scrollbar-track {
+            background: transparent;
+          }
+        `;
+        document.head.appendChild(style);
+      }
+    }
+  }, [isMobile]);
+
   return (
     <div
       style={{
@@ -44,15 +68,9 @@ export const FilterIndicators: React.FC<FilterIndicatorsProps> = ({
     >
       {/* Filter indicators container - evenly spaced across remaining width */}
       <div
+        className={isMobile ? "filter-indicators-container" : undefined}
         style={{
-          display: "flex",
-          gap: "0.5rem",
-          paddingRight: "0.5rem",
-          alignItems: "center",
-          justifyContent: "start",
-          flexWrap: "wrap",
-          flex: 1,
-          marginLeft: isMobile ? "0.5rem" : "0",
+          ...feedStyles.filterIndicatorsContainer(isMobile),
         }}
       >
         {/* "Filters:" label - only show when there are active filters */}
