@@ -54,6 +54,12 @@ export interface ThreadStoreActions {
     lastSeenCreatedAt: number | null,
     lastSeenIds: Set<string>
   ) => void;
+  // Optimistically add a newly published reply to a parent in a thread
+  addOptimisticReply: (
+    rootId: string,
+    parentId: string,
+    reply: Note
+  ) => void;
 }
 
 export interface ThreadStoreSelectors {
@@ -242,6 +248,53 @@ export const useThreadStore = create<ThreadStore>((set, get) => ({
             frontier: {
               lastSeenCreatedAt,
               lastSeenIds,
+            },
+          },
+        },
+      };
+    });
+  },
+
+  addOptimisticReply: (rootId, parentId, reply) => {
+    set((state) => {
+      // Initialize thread state if missing
+      const existing = state.threads[rootId] || initializeThreadState(parentId);
+
+      // Merge note
+      const notesById = new Map(existing.notesById);
+      notesById.set(reply.id, reply);
+
+      // Merge children list
+      const childrenIdMap = { ...existing.childrenIdMap };
+      const existingIds = childrenIdMap[parentId] ? [...childrenIdMap[parentId]] : [];
+      if (!existingIds.includes(reply.id)) {
+        existingIds.push(reply.id);
+        // Sort by created_at ascending to match existing chronological ordering
+        existingIds.sort((a, b) => {
+          const na = notesById.get(a);
+          const nb = notesById.get(b);
+          return (na?.created_at || 0) - (nb?.created_at || 0);
+        });
+      }
+      childrenIdMap[parentId] = existingIds;
+
+      // Recompute direct children if current parent matches
+      const directChildrenIds =
+        (existing.currentParentId || parentId) === parentId
+          ? existingIds
+          : existing.directChildrenIds;
+
+      return {
+        threads: {
+          ...state.threads,
+          [rootId]: {
+            ...existing,
+            notesById,
+            childrenIdMap,
+            directChildrenIds,
+            status: {
+              ...existing.status,
+              lastUpdated: Date.now(),
             },
           },
         },

@@ -58,6 +58,7 @@ import {
   insertMention,
   getCursorPositionAfterMention,
 } from "../utils/mentions";
+import { useThreadStore } from "../state/threadStore";
 
 interface ReplyModalProps {
   parentNoteId: string;
@@ -742,7 +743,39 @@ export const ReplyModal: React.FC<ReplyModalProps> = ({
           } catch {}
         }
 
-        // 3) Optimistically prepend into current user's profile feed first page if present
+        // 3) Update the in-memory thread store used by ThreadPage so the reply appears immediately
+        try {
+          const addOptimisticReply = useThreadStore.getState().addOptimisticReply;
+          const rootTag = (signed.tags || []).find(
+            (t: any) => Array.isArray(t) && t[0] === "e" && t[3] === "root"
+          );
+          const computedRootId = (rootTag && rootTag[1]) || loadedParent.id;
+
+          const storeNote: Note = {
+            id: signed.id,
+            pubkey: (signed as any).pubkey || hexPubkey || ctxPubkey || "",
+            content: (signed as any).content || content.trim(),
+            created_at:
+              (signed as any).created_at || Math.floor(Date.now() / 1000),
+            kind: (signed as any).kind || 1,
+            tags: (signed as any).tags || [],
+            imageUrls: extractImageUrls(
+              (signed as any).content || content.trim()
+            ),
+            videoUrls: extractVideoUrls(
+              (signed as any).content || content.trim()
+            ),
+            receivedAt: Date.now(),
+          };
+
+          // Update under the computed root id and also under the parent-as-root key
+          addOptimisticReply(computedRootId, loadedParent.id, storeNote);
+          if (computedRootId !== loadedParent.id) {
+            addOptimisticReply(loadedParent.id, loadedParent.id, storeNote);
+          }
+        } catch {}
+
+        // 4) Optimistically prepend into current user's profile feed first page if present
         if (ctxPubkey) {
           // Build partial prefix of profile feed query keys used by useNostrifyFeed
           // Key format: ['nostrify-feed', authorKey, kindsKey, relayKey, flagsKey, hashtagsKey, mutedLen, pageSize]
@@ -785,7 +818,7 @@ export const ReplyModal: React.FC<ReplyModalProps> = ({
           );
         }
 
-        // 4) If replying to a nested comment, also update the root thread
+        // 5) If replying to a nested comment, also update the root thread
         try {
           const eTags = Array.isArray(signed?.tags)
             ? (signed.tags as any[])
