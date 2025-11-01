@@ -61,6 +61,7 @@ const ThreadPage: React.FC = () => {
 
   const handleHashtagClick = useUniversalHashtagHandler();
   const containerRef = useRef<HTMLDivElement>(null);
+  const scrollAreaRef = useRef<HTMLDivElement>(null);
   const [uiStateHydrated, setUiStateHydrated] = useState(false);
   const [showFullMainNoteContent, setShowFullMainNoteContent] = useState(false);
   const [collapsedNotes, setCollapsedNotes] = useState<Set<string>>(
@@ -167,6 +168,14 @@ const ThreadPage: React.FC = () => {
     enabled: uiStateHydrated && !status.isLoading,
   });
 
+  // Force scroll to top on thread id change (covers [select] and Continue thread)
+  useEffect(() => {
+    try {
+      scrollAreaRef.current?.scrollTo({ top: 0, behavior: "auto" });
+      window.scrollTo({ top: 0, behavior: "auto" });
+    } catch {}
+  }, [hexNoteId]);
+
   // Hydrate UI state
   useEffect(() => {
     setUiStateHydrated(true);
@@ -242,11 +251,9 @@ const ThreadPage: React.FC = () => {
   }, []);
 
   // Show loading only when no data at all
-  if (
-    status.isLoading &&
-    !safeParentNote &&
-    comments.length === 0
-  ) {
+  const isEmptyThread = !safeParentNote && comments.length === 0;
+  const shouldShowInitialSpinner = isEmptyThread && (status.isLoading || Boolean(rootThreadIdFromState));
+  if (shouldShowInitialSpinner) {
     return <ThreadLoading isMobile={isMobileLayout} noteId={noteId} />;
   }
 
@@ -443,6 +450,7 @@ const ThreadPage: React.FC = () => {
         </div>
 
         <div
+          ref={scrollAreaRef}
           style={{
             width: "100%",
             flex: 1,
