@@ -39,6 +39,7 @@ type NestedRepliesProps = {
     imageUrl: string,
     dimensions: { width: number; height: number }
   ) => void;
+  prefetchThreadFn?: (noteId: string) => void;
 };
 
 const NestedReplies: React.FC<NestedRepliesProps> = ({
@@ -68,6 +69,7 @@ const NestedReplies: React.FC<NestedRepliesProps> = ({
   onAsciiRendered = () => {},
   onMediaLoadError = () => {},
   onImageDimensionsLoaded = () => {},
+  prefetchThreadFn,
 }) => {
   const queryClient = useQueryClient();
   // Prefer id-based child mapping if present; fall back to provided structure
@@ -239,12 +241,24 @@ const NestedReplies: React.FC<NestedRepliesProps> = ({
                     boxSizing: "border-box",
                   }}
                 >
+                  {/* Horizontal connector from vertical line to this nested reply */}
                   <div
                     style={{
                       position: "absolute",
                       left: "0",
-                      top: "0",
-                      bottom: isLastNested ? "calc(100% - 1.3rem)" : "0",
+                      top: "1.5rem",
+                      width: "1rem",
+                      height: "1px",
+                      backgroundColor: "var(--border-color)",
+                    }}
+                  />
+                  {/* Vertical line for nested stack; truncate exactly to header for last nested item */}
+                  <div
+                    style={{
+                      position: "absolute",
+                      left: "0",
+                      top: 0,
+                      height: isLastNested ? "1.5rem" : "100%",
                       width: "1px",
                       backgroundColor: "var(--border-color)",
                     }}
@@ -261,16 +275,6 @@ const NestedReplies: React.FC<NestedRepliesProps> = ({
                       minWidth: 0,
                     }}
                   >
-                    <div
-                      style={{
-                        position: "absolute",
-                        left: "-1.5rem",
-                        top: "1.25rem",
-                        width: "1rem",
-                        height: "1px",
-                        backgroundColor: "var(--border-color)",
-                      }}
-                    />
                     <div
                       style={{
                         display: "flex",
@@ -319,6 +323,8 @@ const NestedReplies: React.FC<NestedRepliesProps> = ({
                         {formatRelativeTime(nestedReply.created_at)}
                       </span>
                       <button
+                        onMouseEnter={() => prefetchThreadFn?.(nestedReply.id)}
+                        onTouchStart={() => prefetchThreadFn?.(nestedReply.id)}
                         onClick={() => handleFocusThreadOnNote(nestedReply.id)}
                         title="Focus thread on this note"
                         style={{
@@ -423,6 +429,7 @@ const NestedReplies: React.FC<NestedRepliesProps> = ({
                             onAsciiRendered={onAsciiRendered}
                             onMediaLoadError={onMediaLoadError}
                             onImageDimensionsLoaded={onImageDimensionsLoaded}
+                            prefetchThreadFn={prefetchThreadFn}
                           />
                         )}
 
@@ -487,6 +494,8 @@ const NestedReplies: React.FC<NestedRepliesProps> = ({
                                 }}
                               >
                                 <button
+                                  onMouseEnter={() => prefetchThreadFn?.(nestedReply.id)}
+                                  onTouchStart={() => prefetchThreadFn?.(nestedReply.id)}
                                   onClick={() =>
                                     handleFocusThreadOnNote(nestedReply.id)
                                   }

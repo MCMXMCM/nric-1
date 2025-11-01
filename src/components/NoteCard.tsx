@@ -41,6 +41,7 @@ import {
   getGlobalRelayPool,
   type RelayConnectionPool,
 } from "../utils/nostr/relayConnectionPool";
+import { prefetchThread } from "../utils/thread/prefetch";
 
 interface NoteCardProps {
   note: Note;
@@ -811,6 +812,42 @@ const NoteCardComponent: React.FC<NoteCardProps> = ({
       key={uniqueKey}
       className="note-card"
       data-note-id={note.id}
+      onMouseEnter={() => {
+        // Prefetch thread: use root if present, otherwise note as root
+        const rootId = rootNoteId || note.id;
+        const parent = note.id;
+        prefetchThread({
+          rootId,
+          parentId: parent,
+          relayUrls: readRelayUrls || [],
+          nostrClient,
+          maxFetch: 150,
+          timeBudget: 700,
+        });
+        // Also prefetch parent-of-reply path if available
+        if (parentNoteId) {
+          prefetchThread({
+            rootId: rootId,
+            parentId: parentNoteId,
+            relayUrls: readRelayUrls || [],
+            nostrClient,
+            maxFetch: 120,
+            timeBudget: 600,
+          });
+        }
+      }}
+      onTouchStart={() => {
+        const rootId = rootNoteId || note.id;
+        const parent = note.id;
+        prefetchThread({
+          rootId,
+          parentId: parent,
+          relayUrls: readRelayUrls || [],
+          nostrClient,
+          maxFetch: 150,
+          timeBudget: 700,
+        });
+      }}
       style={{
         // backgroundColor:
         //   isDarkMode || isMobile ? "var(--app-secondary-bg-color)" : "#ffffff",

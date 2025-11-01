@@ -12,6 +12,7 @@ type ThreadSummaryProps = {
   expandedNestedReplies: Set<string>;
   navigate: (opts: any) => void;
   isLoading?: boolean;
+  prefetchThreadFn?: (noteId: string) => void;
 };
 
 // Build a flat list of { id, pubkey, depth } for a compact threaded outline
@@ -100,6 +101,7 @@ const ThreadSummary: React.FC<ThreadSummaryProps> = ({
   expandedNestedReplies,
   navigate,
   isLoading = false,
+  prefetchThreadFn,
 }) => {
   if (isMobileLayout) return null;
   if (!parentNote) return null;
@@ -261,6 +263,8 @@ const ThreadSummary: React.FC<ThreadSummaryProps> = ({
               <a
                 href={linkHref}
                 onClick={(e) => handleLinkClick(e, item.id, item.depth)}
+                onMouseEnter={() => prefetchThreadFn?.(item.id)}
+                onTouchStart={() => prefetchThreadFn?.(item.id)}
                 style={{
                   display: "block",
                   marginLeft: `${indentLevel}rem`,

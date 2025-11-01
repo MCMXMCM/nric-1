@@ -45,6 +45,7 @@ type CommentsListProps = {
     imageUrl: string,
     dimensions: { width: number; height: number }
   ) => void;
+  prefetchThreadFn?: (noteId: string) => void;
 };
 
 const CommentsList: React.FC<CommentsListProps> = ({
@@ -80,6 +81,7 @@ const CommentsList: React.FC<CommentsListProps> = ({
   onAsciiRendered = () => {},
   onMediaLoadError = () => {},
   onImageDimensionsLoaded = () => {},
+  prefetchThreadFn,
 }) => {
   // Only show loading when actively fetching AND no comments loaded yet
   if (isLoadingComments && comments.length === 0) {
@@ -148,17 +150,28 @@ const CommentsList: React.FC<CommentsListProps> = ({
               data-index={idx + 1}
               style={{ position: "relative", paddingLeft: "1.5rem" }}
             >
+              {/* Horizontal connector from vertical line to this reply */}
               <div
                 style={{
                   position: "absolute",
                   left: "0",
-                  top: "0",
-                  bottom: isLast ? "calc(100% - 1.3rem)" : "0",
+                  top: "1.5rem",
+                  width: "1rem",
+                  height: "1px",
+                  backgroundColor: "var(--border-color)",
+                }}
+              />
+              {/* Vertical line establishing reply stack; truncate exactly to header for last item */}
+              <div
+                style={{
+                  position: "absolute",
+                  left: "0",
+                  top: 0,
+                  height: isLast ? "1.5rem" : "100%",
                   width: "1px",
                   backgroundColor: "var(--border-color)",
                 }}
               />
-
               <div
                 style={{
                   display: "flex",
@@ -167,16 +180,6 @@ const CommentsList: React.FC<CommentsListProps> = ({
                   position: "relative",
                 }}
               >
-                <div
-                  style={{
-                    position: "absolute",
-                    left: "-1.5rem",
-                    top: "1.25rem",
-                    width: "1rem",
-                    height: "1px",
-                    backgroundColor: "var(--border-color)",
-                  }}
-                />
                 <div
                   style={{
                     display: "flex",
@@ -219,6 +222,8 @@ const CommentsList: React.FC<CommentsListProps> = ({
                     {formatRelativeTime(comment.created_at)}
                   </span>
                   <button
+                    onMouseEnter={() => prefetchThreadFn?.(comment.id)}
+                    onTouchStart={() => prefetchThreadFn?.(comment.id)}
                     onClick={() => handleFocusThreadOnNote(comment.id)}
                     title="Focus thread on this note"
                     style={{
@@ -378,6 +383,7 @@ const CommentsList: React.FC<CommentsListProps> = ({
                       onAsciiRendered={onAsciiRendered}
                       onMediaLoadError={onMediaLoadError}
                       onImageDimensionsLoaded={onImageDimensionsLoaded}
+                      prefetchThreadFn={prefetchThreadFn}
                     />
                   </div>
                 )}
