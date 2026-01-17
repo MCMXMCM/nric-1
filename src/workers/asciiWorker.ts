@@ -654,8 +654,6 @@ const renderAsciiGl = (bitmap: ImageBitmap, opts: {
     for (let x = 0; x < cols; x++) {
       const cellSizeX = bitmap.width / cols;
       const cellSizeY = bitmap.height / rows;
-      const cellBaseX = x * cellSizeX;
-      const cellBaseY = y * cellSizeY;
       
       // Sample 6 internal regions for shape vector
       // Convert cell-relative positions to normalized image coordinates [0,1]

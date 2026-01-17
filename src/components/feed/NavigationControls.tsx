@@ -18,10 +18,7 @@ export const NavigationControls: React.FC<NavigationControlsProps> = ({
   onNavigation,
 }) => {
   const {
-    focusState,
     navigateFocus,
-    activateKeyboardNavigation,
-    deactivateKeyboardNavigation,
   } = useHotkeyContext();
   const vimMode = useUIStore((s) => s.vimMode || false);
 

@@ -219,12 +219,6 @@ export const CORSImage: React.FC<CORSImageProps> = ({
       : typeof expectedWidth === "string"
         ? Number.parseFloat(expectedWidth)
         : undefined;
-  const sizesAttr = enableOptimization
-    ? sizesHint ||
-      (Number.isFinite(numericExpectedWidth)
-        ? `${Math.round(numericExpectedWidth as number)}px`
-        : "100vw")
-    : undefined;
 
   // NOTE: Early return moved AFTER all hooks to avoid "Rendered fewer hooks than expected" error
   // The early return was previously here, but it caused hook count mismatch when imageError changed
