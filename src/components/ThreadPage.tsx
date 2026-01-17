@@ -36,10 +36,11 @@ const ThreadPage: React.FC = () => {
     pubkeyHex: pubkey,
   });
   const { getDisplayNameForPubkey } = useDisplayNames(relayUrls);
-  const { useAscii, useColor, imageMode } = useUIStore((s: any) => ({
+  const { useAscii, useColor, imageMode, vimMode } = useUIStore((s: any) => ({
     useAscii: s.useAscii,
     useColor: s.useColor,
     imageMode: s.imageMode,
+    vimMode: s.vimMode || false,
   }));
 
   // Decode NIP-19 note ID to hex
@@ -303,7 +304,7 @@ const ThreadPage: React.FC = () => {
   return (
     <ThreadWithHotkeys
       totalItems={totalItemsForHotkeys}
-      enabled={!isMobileLayout}
+      enabled={!isMobileLayout && vimMode}
       isLoadingComments={status.isLoading && comments.length === 0}
       onLink={() => {
         const note = getFocusedNote();

@@ -1,6 +1,8 @@
 import React from "react";
 import { feedStyles } from "./styles";
 import { useHotkeyContext } from "../../contexts/HotkeyContext";
+import { useUIStore } from "../lib/useUIStore";
+import { setVimMode } from "../lib/uiStore";
 
 interface NavigationControlsProps {
   isMobile: boolean;
@@ -21,6 +23,7 @@ export const NavigationControls: React.FC<NavigationControlsProps> = ({
     activateKeyboardNavigation,
     deactivateKeyboardNavigation,
   } = useHotkeyContext();
+  const vimMode = useUIStore((s) => s.vimMode || false);
 
   if (isMobile) {
     return null; // No longer showing index/total indicators
@@ -33,26 +36,23 @@ export const NavigationControls: React.FC<NavigationControlsProps> = ({
         style={{
           width: "12px",
           height: "12px",
-          backgroundColor: focusState.isKeyboardNavigationActive
+          backgroundColor: vimMode
             ? "#d97706"
-            : "#92400e", // Brighter when active, darker when off
+            : "#92400e", // Brighter when vim mode is on, darker when off
           border: `1px solid #92400e`,
-          boxShadow: focusState.isKeyboardNavigationActive
+          boxShadow: vimMode
             ? "0 0 4px #f59e0b, 0 0 8px rgba(245, 158, 11, 0.3), inset 0 1px 0 rgba(255, 255, 255, 0.16), inset 0 -1px 0 rgba(0, 0, 0, 0.3)"
             : "0 0 2px #92400e, 0 0 4px rgba(146, 64, 14, 0.2), inset 0 1px 0 rgba(255, 255, 255, 0.08), inset 0 -1px 0 rgba(0, 0, 0, 0.3)",
           transition: "all 0.2s ease",
           position: "relative",
-          opacity: focusState.isKeyboardNavigationActive ? 0.8 : 0.4,
+          opacity: vimMode ? 0.8 : 0.4,
           marginRight: "0.5rem",
           cursor: "pointer",
           borderRadius: "50%",
         }}
         onClick={() => {
-          if (focusState.isKeyboardNavigationActive) {
-            deactivateKeyboardNavigation();
-          } else {
-            activateKeyboardNavigation();
-          }
+          // Toggle vim mode setting (this will persist and control keyboard navigation)
+          setVimMode(!vimMode);
         }}
         onMouseEnter={(e) => {
           e.currentTarget.style.boxShadow =
@@ -60,18 +60,17 @@ export const NavigationControls: React.FC<NavigationControlsProps> = ({
           e.currentTarget.style.backgroundColor = "#f59e0b";
         }}
         onMouseLeave={(e) => {
-          const isActive = focusState.isKeyboardNavigationActive;
-          e.currentTarget.style.boxShadow = isActive
+          e.currentTarget.style.boxShadow = vimMode
             ? "0 0 4px #f59e0b, 0 0 8px rgba(245, 158, 11, 0.3), inset 0 1px 0 rgba(255, 255, 255, 0.16), inset 0 -1px 0 rgba(0, 0, 0, 0.3)"
             : "0 0 2px #92400e, 0 0 4px rgba(146, 64, 14, 0.2), inset 0 1px 0 rgba(255, 255, 255, 0.08), inset 0 -1px 0 rgba(0, 0, 0, 0.3)";
-          e.currentTarget.style.backgroundColor = isActive
+          e.currentTarget.style.backgroundColor = vimMode
             ? "#d97706"
             : "#92400e";
         }}
         title={
-          focusState.isKeyboardNavigationActive
-            ? "Click to disable keyboard navigation"
-            : "Click to enable keyboard navigation"
+          vimMode
+            ? "Click to disable Vim Mode"
+            : "Click to enable Vim Mode"
         }
       />
       <span

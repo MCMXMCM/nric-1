@@ -731,7 +731,22 @@ export function useNostrifyFeed(config: UseNostrifyFeedConfig): UseNostrifyFeedR
     await queryClient.invalidateQueries({ queryKey, exact: true });
   };
 
+  // Invalidate and refetch query when filter settings change
+  // This ensures the feed immediately updates when showReplies/showReposts toggles change
+  // Note: When filter settings change, the queryKey changes (via flagsKey), which creates a new query.
+  // This effect ensures the query is invalidated to force immediate refetch with new filter settings.
+  useEffect(() => {
+    // When filter settings change, invalidate the current query to force refetch
+    // The queryKey will have changed (due to flagsKey), creating a new query automatically
+    // This invalidation ensures any cached data is cleared and fresh data is fetched
+    queryClient.invalidateQueries({ queryKey, exact: true });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showReplies, showReposts]);
+
   // Flatten all pages into a single array
+  // IMPORTANT: This memo applies filtering to cached data based on current filter settings.
+  // When showReplies/showReposts change, this memo recalculates and filters the cached notes
+  // to ensure the UI immediately reflects the new filter settings, even before new data is fetched.
   const allNotes = useMemo(() => {
     const pages = infiniteQuery.data?.pages as Array<{ notes: Note[] }> | undefined;
     if (!pages) return [] as Note[];
@@ -745,12 +760,12 @@ export function useNostrifyFeed(config: UseNostrifyFeedConfig): UseNostrifyFeedR
     }
     
     // Apply active filter options to cached notes
-    // This ensures filters work correctly when toggled on/off
+    // This ensures filters work correctly when toggled on/off, even with cached data
     const filteredNotes = Array.from(unique.values()).filter(note => {
-      // Reply filter
+      // Reply filter: filter out notes that have 'e' tags (event references indicating replies)
       if (!showReplies && note.tags?.some(tag => tag[0] === 'e')) return false;
       
-      // Repost filter
+      // Repost filter: filter out kind 6 events (reposts)
       if (!showReposts && note.kind === 6) return false;
       
       // Hashtag filter

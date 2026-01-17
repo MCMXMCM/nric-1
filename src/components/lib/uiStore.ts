@@ -26,6 +26,8 @@ export interface UIState {
   primaryBlossomServerUrl?: string
   // Outbox relay mode
   outboxMode: boolean
+  // Vim mode for keyboard navigation
+  vimMode?: boolean
 }
 
 function readBool(key: string, fallback: boolean): boolean {
@@ -131,6 +133,7 @@ export const uiStore = new Store<UIState>({
   ]),
   primaryBlossomServerUrl: readJson('primaryBlossomServerUrl', 'https://blossom.primal.net/'),
   outboxMode: readBool('outboxMode', false),
+  vimMode: readBool('vimMode', false),
 })
 
 export const setShowSettings = (open: boolean) => {
@@ -283,6 +286,11 @@ export const updateBlossomServerUrl = (index: number, url: string) => {
 export const setPrimaryBlossomServerUrl = (url: string) => {
   try { localStorage.setItem('primaryBlossomServerUrl', JSON.stringify(url)) } catch {}
   uiStore.setState((s) => ({ ...s, primaryBlossomServerUrl: url }))
+}
+
+export const setVimMode = (value: boolean) => {
+  try { localStorage.setItem('vimMode', String(value)) } catch {}
+  uiStore.setState((s) => ({ ...s, vimMode: value }))
 }
 
 export type UIStore = typeof uiStore

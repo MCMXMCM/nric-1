@@ -9,6 +9,7 @@ import {
   setUseColor,
   setImageMode,
   setLongFormMode,
+  setVimMode,
 } from "../lib/uiStore";
 
 interface ModesSectionProps {
@@ -24,6 +25,7 @@ export const ModesSection: React.FC<ModesSectionProps> = ({
   const useColor = useUIStore((s) => s.useColor);
   const imageMode = useUIStore((s) => s.imageMode);
   const longFormMode = useUIStore((s) => s.longFormMode || false);
+  const vimMode = useUIStore((s) => s.vimMode || false);
   return (
     <div style={{ flex: 1, minWidth: 0 }}>
       <SectionHeader title="Modes" paddingTop="0" />
@@ -61,6 +63,15 @@ export const ModesSection: React.FC<ModesSectionProps> = ({
             value={useAscii}
             onChange={() => {
               setUseAscii(!useAscii);
+            }}
+          />
+        </TreeListItem>
+        <TreeListItem>
+          <SettingRow
+            label="Vim Mode"
+            value={vimMode}
+            onChange={() => {
+              setVimMode(!vimMode);
             }}
           />
         </TreeListItem>

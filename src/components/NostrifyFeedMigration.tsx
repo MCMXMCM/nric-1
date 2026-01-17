@@ -30,6 +30,7 @@ import { useNostrFeedSetup } from "../hooks/useNostrFeedSetup";
 import { usePullToRefresh } from "../hooks/usePullToRefresh";
 import { useEnhancedPrefetch } from "../hooks/useEnhancedPrefetch";
 import { setCustomHashtags } from "./lib/uiStore";
+import { useUIStore } from "./lib/useUIStore";
 
 // Essential components
 import { FullScreenImageViewer } from "./FullScreenImageViewer";
@@ -97,6 +98,9 @@ const FeedContentWithConditionalPadding: React.FC<{
 const NostrifyFeedMigration: React.FC = () => {
   // Setup and initialization
   const setup = useNostrFeedSetup();
+  
+  // Read vimMode from UI store
+  const vimMode = useUIStore((s) => s.vimMode || false);
 
   // Get outbox discovery status
   const { isDiscovering } = useEnhancedOutboxDiscoveryStatus();
@@ -1518,8 +1522,9 @@ const NostrifyFeedMigration: React.FC = () => {
       enabled={
         !state.isMobile &&
         !isProfileRoute &&
-        !location.pathname.startsWith("/thread/")
-      } // Disable hotkeys for profile and thread routes
+        !location.pathname.startsWith("/thread/") &&
+        vimMode
+      } // Disable hotkeys for profile and thread routes, and when vim mode is off
     >
       {/* For profile routes and thread routes, render outlet directly without container constraints */}
       {isProfileRoute || location.pathname.startsWith("/thread/") ? (

@@ -4,10 +4,16 @@ frontend:
   phases:
     preBuild:
       commands:
-        - npm ci
+        - curl -fsSL https://bun.sh/install | bash
+        - export BUN_INSTALL="$HOME/.bun"
+        - export PATH="$BUN_INSTALL/bin:$PATH"
+        - bun --version
+        - bun install --frozen-lockfile
     build:
       commands:
-        - npm run build
+        - export BUN_INSTALL="$HOME/.bun"
+        - export PATH="$BUN_INSTALL/bin:$PATH"
+        - bun run build
         - echo "/*    /index.html   200" > dist/_redirects
         - echo "/*/    /index.html   200" >> dist/_redirects
 
@@ -18,6 +24,7 @@ frontend:
   cache:
     paths:
       - node_modules/**/*
+      - ~/.bun/install/cache/**/*
   customHeaders:
     # Cache control for static assets with hashes (can cache longer)
     - pattern: "/assets/**"
