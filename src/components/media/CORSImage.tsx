@@ -42,7 +42,7 @@ export const CORSImage: React.FC<CORSImageProps> = ({
   expectedAspectRatio,
   isDarkMode = false,
   showPlaceholder = true,
-  sizesHint,
+  sizesHint: _sizesHint,
 }) => {
   // Start with viewport true for immediate loading of visible images
   // The intersection observer will handle truly off-screen images

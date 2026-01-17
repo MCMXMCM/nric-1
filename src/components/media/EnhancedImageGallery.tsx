@@ -76,7 +76,7 @@ export const EnhancedImageGallery: React.FC<EnhancedImageGalleryProps> = ({
   >({});
 
   // Debounce force updates
-  const updateTimeoutRef = useRef<number | null>(null);
+  const updateTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const triggerUpdate = useCallback(() => {
     if (updateTimeoutRef.current) {
       clearTimeout(updateTimeoutRef.current);

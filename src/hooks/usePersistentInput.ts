@@ -22,7 +22,7 @@ export function usePersistentInput(storageKey: string, initialValue: string = ''
 
   // Track the latest value for saving on unmount
   const latestValueRef = useRef(value);
-  const saveTimeoutRef = useRef<number | null>(null);
+  const saveTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Update the ref whenever value changes
   useEffect(() => {

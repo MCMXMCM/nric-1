@@ -134,7 +134,7 @@ const NostrifyFeedMigration: React.FC = () => {
   // State for loading new notes and scroll tracking
   const [isLoadingNewNotes, setIsLoadingNewNotes] = useState(false);
   const [showFallbackError, setShowFallbackError] = useState(false);
-  const loadingTimeoutRef = useRef<number | null>(null);
+  const loadingTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Removed dynamic overscan to prevent scroll jumping
   const hasLoadedOnceRef = useRef(false);
   const prevTopCreatedAtRef = useRef<number | null>(null);

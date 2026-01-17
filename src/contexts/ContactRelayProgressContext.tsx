@@ -75,7 +75,7 @@ export function ContactRelayProgressProvider({
     },
   });
 
-  const progressIntervalRef = useRef<number | null>(null);
+  const progressIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const isTrackingRef = useRef(false);
 
   const updateProgress = useCallback(async () => {

@@ -53,7 +53,7 @@ export const MediaGallery: React.FC<MediaGalleryProps> = ({
   const [carouselIndex, setCarouselIndex] = useState(0);
 
   // Debounce force updates to prevent excessive re-renders during image loading/error bursts
-  const updateTimeoutRef = useRef<number | null>(null);
+  const updateTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const triggerUpdate = useCallback(() => {
     if (updateTimeoutRef.current) {
       clearTimeout(updateTimeoutRef.current);

@@ -74,7 +74,7 @@ const ZapModal: React.FC<ZapModalProps> = ({
 
     setIsZapping(true);
     setZapError(null); // Clear any previous errors
-    let timeoutId: number | undefined;
+    let timeoutId: ReturnType<typeof setTimeout> | undefined;
 
     try {
       if (!effectiveRecipientPubkey) {
