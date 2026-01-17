@@ -10,8 +10,6 @@ interface NostrLinkTextProps {
   onHashtagClick?: (hashtag: string) => void;
   renderNoteLinkAsThread?: boolean;
   noteLinkLabel?: string;
-  // URLs that have successfully loaded previews - hide these from text
-  loadedPreviewUrls?: Set<string>;
 }
 
 const NostrLinkText: React.FC<NostrLinkTextProps> = ({
@@ -20,7 +18,6 @@ const NostrLinkText: React.FC<NostrLinkTextProps> = ({
   onHashtagClick,
   renderNoteLinkAsThread = false,
   noteLinkLabel,
-  loadedPreviewUrls = new Set(),
 }) => {
   const location = useLocation();
   const isHomeFeed = location.pathname === "/";
@@ -76,14 +73,7 @@ const NostrLinkText: React.FC<NostrLinkTextProps> = ({
 
     // Handle http(s) URLs
     if (!bech32 && /^https?:\/\//i.test(fullMatch)) {
-      // If this URL has a loaded preview, hide it from the text (preview will show below)
-      if (loadedPreviewUrls.has(fullMatch)) {
-        // Don't add this URL to the nodes - let the preview replace it
-        lastIndex = matchIndex + fullMatch.length;
-        continue;
-      }
-
-      // URL doesn't have a loaded preview, show it as a clickable link
+      // Show URL as a clickable link
       nodes.push(
         <a
           key={`${matchIndex}-url`}
@@ -117,6 +107,8 @@ const NostrLinkText: React.FC<NostrLinkTextProps> = ({
                 color: "var(--link-color)",
                 textDecoration: "underline",
                 cursor: "pointer",
+                wordBreak: "break-all",
+                overflowWrap: "anywhere",
               }}
             >
               {display}
@@ -140,6 +132,8 @@ const NostrLinkText: React.FC<NostrLinkTextProps> = ({
                 color: "var(--link-color)",
                 textDecoration: "underline",
                 cursor: "pointer",
+                wordBreak: "break-all",
+                overflowWrap: "anywhere",
               }}
             >
               {display}

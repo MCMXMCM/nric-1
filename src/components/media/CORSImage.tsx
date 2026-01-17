@@ -49,14 +49,18 @@ export const CORSImage: React.FC<CORSImageProps> = ({
   const [isInViewport, setIsInViewport] = useState(true);
   const imageRef = useRef<HTMLImageElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
-  const [resolvedUrl, setResolvedUrl] = useState<string>(() => {
-    // Initialize with cached URL if available
-    return mediaLoader.getResolvedUrl(url) || url;
+  const [resolvedUrl, setResolvedUrl] = useState<string | null>(() => {
+    // Initialize with cached URL if available, otherwise null (wait for mediaLoader)
+    return mediaLoader.getResolvedUrl(url) || null;
   });
   const [imageError, setImageError] = useState<boolean>(false);
   const [internalLoading, setInternalLoading] = useState<boolean>(() => {
     // If image is already cached, don't show loading state
     return !mediaLoader.isImageLoaded(url);
+  });
+  const [urlResolutionPending, setUrlResolutionPending] = useState<boolean>(() => {
+    // Track if we're still waiting for mediaLoader to resolve
+    return !mediaLoader.getResolvedUrl(url);
   });
   const [optimizedUrl, setOptimizedUrl] = useState<string | null>(null);
   const [, setOptimizationInfo] = useState<{
@@ -65,10 +69,12 @@ export const CORSImage: React.FC<CORSImageProps> = ({
     compressionRatio: number;
   } | null>(null);
   const [corsMode, setCorsMode] = useState<"anonymous" | "none">("anonymous");
-  const [retryAttempt, setRetryAttempt] = useState<number>(0);
+  const [proxyFailed, setProxyFailed] = useState<boolean>(false);
 
   // Store cleanup function for optimized URL
   const cleanupRef = useRef<(() => void) | null>(null);
+  // Store timeout for loading detection
+  const loadingTimeoutRef = useRef<number | null>(null);
 
   React.useEffect(() => {
     let isMounted = true;
@@ -83,12 +89,13 @@ export const CORSImage: React.FC<CORSImageProps> = ({
     const isAlreadyLoaded = mediaLoader.isImageLoaded(url);
     const cachedUrl = isAlreadyLoaded ? mediaLoader.getResolvedUrl(url) : null;
 
-    // Reset error state and retry state when URL changes
+    // Reset error state when URL changes
     setImageError(false);
     // Only set loading to true if image is NOT already cached
     setInternalLoading(!isAlreadyLoaded);
     setCorsMode("anonymous");
-    setRetryAttempt(0);
+    setProxyFailed(false);
+    setUrlResolutionPending(!isAlreadyLoaded);
 
     // If image is already loaded, use cached result immediately without showing loading state
     if (isAlreadyLoaded && cachedUrl && isMounted) {
@@ -96,13 +103,46 @@ export const CORSImage: React.FC<CORSImageProps> = ({
       setOptimizedUrl(null);
       setOptimizationInfo(null);
       setInternalLoading(false); // Ensure loading state is false for cached images
+      setUrlResolutionPending(false);
       console.log(`🖼️ Using cached image: ${url.slice(0, 50)}...`);
       return;
     }
 
-    // By default use the original URL. If optimization is enabled, prepare a candidate optimized URL.
+    // Trust mediaLoader's resolution - it handles all proxy fallback logic
+    // CRITICAL: Wait for mediaLoader to resolve BEFORE setting the img src
+    // This ensures we use the proxy URL if the original has CORS issues
     if (isMounted) {
-      setResolvedUrl(url);
+      // Use mediaLoader to get the best URL (it handles caching and proxy resolution)
+      const cachedResolved = mediaLoader.getResolvedUrl(url);
+      if (cachedResolved) {
+        setResolvedUrl(cachedResolved);
+        setUrlResolutionPending(false);
+      } else {
+        // DON'T set resolvedUrl to original URL yet - wait for mediaLoader
+        // The img element will wait until we have a resolved URL
+        setResolvedUrl(null);
+        setUrlResolutionPending(true);
+        
+        // Load via mediaLoader to get resolved URL (proxy if needed)
+        mediaLoader.loadMedia(url).then((result) => {
+          if (isMounted) {
+            if (result.success) {
+              setResolvedUrl(result.url);
+            } else {
+              // If mediaLoader fails, fall back to original URL as last resort
+              console.warn(`[CORSImage] mediaLoader failed for ${url.slice(0, 50)}..., trying original`);
+              setResolvedUrl(url);
+            }
+            setUrlResolutionPending(false);
+          }
+        }).catch(() => {
+          // If mediaLoader throws, fall back to original URL
+          if (isMounted) {
+            setResolvedUrl(url);
+            setUrlResolutionPending(false);
+          }
+        });
+      }
       if (enableOptimization) {
         setOptimizedUrl(null); // computed at render time via srcset
       }
@@ -156,7 +196,9 @@ export const CORSImage: React.FC<CORSImageProps> = ({
   function buildOptimizedUrl(original: string, width: number): string {
     const base = "https://images.weserv.nl/?url=";
     const encoded = encodeURIComponent(original);
-    const params = `&w=${Math.max(1, Math.floor(width))}&fit=cover&q=75&output=webp`;
+    // Don't force webp conversion - let the proxy decide or use original format
+    // Some sources may not support webp conversion properly, and forcing webp can cause failures
+    const params = `&w=${Math.max(1, Math.floor(width))}&fit=cover&q=75`;
     return `${base}${encoded}${params}`;
   }
 
@@ -184,25 +226,8 @@ export const CORSImage: React.FC<CORSImageProps> = ({
         : "100vw")
     : undefined;
 
-  if (imageError) {
-    return (
-      <div
-        style={{
-          ...style,
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "center",
-          backgroundColor: "var(--background-color)",
-          border: "1px solid var(--border-color)",
-          borderRadius: "4px",
-
-          color: "var(--text-color)",
-        }}
-      >
-        Failed to load image
-      </div>
-    );
-  }
+  // NOTE: Early return moved AFTER all hooks to avoid "Rendered fewer hooks than expected" error
+  // The early return was previously here, but it caused hook count mismatch when imageError changed
 
   // Get cached dimensions if available for better placeholder sizing
   const dimensionsCache = getGlobalImageDimensionsCache();
@@ -248,6 +273,53 @@ export const CORSImage: React.FC<CORSImageProps> = ({
 
   // Check if image is cached to avoid showing placeholder unnecessarily
   const isImageCached = mediaLoader.isImageLoaded(url);
+
+  // Add loading timeout to detect stuck loads
+  React.useEffect(() => {
+    // Clear any existing timeout
+    if (loadingTimeoutRef.current) {
+      clearTimeout(loadingTimeoutRef.current);
+      loadingTimeoutRef.current = null;
+    }
+
+    // If we're loading, have a resolved URL, and image is not cached, start a timeout
+    // Don't start timeout while URL resolution is pending (mediaLoader still working)
+    if (internalLoading && !isImageCached && !imageError && resolvedUrl && !urlResolutionPending) {
+      loadingTimeoutRef.current = window.setTimeout(() => {
+        console.warn(`⏱️ Image load timed out after 10s: ${url.slice(0, 50)}...`);
+        setInternalLoading(false);
+        setImageError(true);
+        onError();
+      }, 10000); // 10 second timeout
+    }
+
+    return () => {
+      if (loadingTimeoutRef.current) {
+        clearTimeout(loadingTimeoutRef.current);
+        loadingTimeoutRef.current = null;
+      }
+    };
+  }, [url, internalLoading, isImageCached, imageError, onError, resolvedUrl, urlResolutionPending]);
+
+  // Early return for error state - placed AFTER all hooks to avoid hook count mismatch
+  if (imageError) {
+    return (
+      <div
+        style={{
+          ...style,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          backgroundColor: "var(--background-color)",
+          border: "1px solid var(--border-color)",
+          borderRadius: "4px",
+          color: "var(--text-color)",
+        }}
+      >
+        Failed to load image
+      </div>
+    );
+  }
 
   // Build a container style that reserves space using aspect-ratio or explicit height
   const aspectRatio = expectedAspectRatio
@@ -304,13 +376,16 @@ export const CORSImage: React.FC<CORSImageProps> = ({
       <img
         ref={imageRef}
         src={
-          isInViewport || !internalLoading
+          // Only set src when we have a resolved URL
+          // This ensures we wait for mediaLoader to resolve (potentially to a proxy URL)
+          // before the browser starts loading the image
+          // The browser's native loading="lazy" and IntersectionObserver handle viewport detection
+          resolvedUrl
             ? optimizedUrl || resolvedUrl
             : undefined
         }
         alt=""
         crossOrigin={corsMode === "anonymous" ? "anonymous" : undefined}
-        referrerPolicy="no-referrer"
         style={{
           // Respect parent-requested sizing first; fall back to sensible defaults
           width: (style.width as number) || "100%",
@@ -322,16 +397,22 @@ export const CORSImage: React.FC<CORSImageProps> = ({
           zIndex: 2,
           display: "block",
         }}
-        srcSet={srcSet}
-        sizes={sizesAttr}
+        // TEMPORARILY DISABLED: srcSet uses weserv.nl proxy which may be slow/failing
+        // srcSet={proxyFailed ? undefined : srcSet}
+        // sizes={proxyFailed ? undefined : sizesAttr}
         loading={loading}
         decoding={decoding}
         fetchPriority={fetchPriority}
         onClick={onClick}
         onLoad={(e) => {
+          // Clear loading timeout on successful load
+          if (loadingTimeoutRef.current) {
+            clearTimeout(loadingTimeoutRef.current);
+            loadingTimeoutRef.current = null;
+          }
+
           setInternalLoading(false);
           setImageError(false);
-          setRetryAttempt(0); // Reset retry count on successful load
 
           // Capture image dimensions
           const img = e.target as HTMLImageElement;
@@ -350,19 +431,44 @@ export const CORSImage: React.FC<CORSImageProps> = ({
           onLoad(dimensions);
         }}
         onError={() => {
+          // Clear loading timeout on error
+          if (loadingTimeoutRef.current) {
+            clearTimeout(loadingTimeoutRef.current);
+            loadingTimeoutRef.current = null;
+          }
+
           setInternalLoading(false);
 
-          // Try fallback approaches before giving up
-          if (corsMode === "anonymous" && retryAttempt === 0) {
-            // First retry: try without CORS
-            setRetryAttempt(1);
-            setCorsMode("none");
+          // Simplified: Trust mediaLoader's resolution. If it fails, try original URL once.
+          // Check if current URL is a proxy URL
+          const isProxyUrl = resolvedUrl && (
+                            resolvedUrl.includes('images.weserv.nl') || 
+                            resolvedUrl.includes('imgproxy.nostr.build') ||
+                            resolvedUrl.includes('corsproxy.io') ||
+                            resolvedUrl.includes('imagedelivery.net'));
+          
+          // If proxy URL failed and we haven't tried original yet, fall back to original
+          if (!proxyFailed && isProxyUrl) {
+            setProxyFailed(true);
             setImageError(false);
             setInternalLoading(true);
+            setOptimizedUrl(null);
+            setResolvedUrl(url);
+            setCorsMode("anonymous");
             return;
           }
 
-          // All fallback attempts failed
+          // If optimized srcSet failed, try without optimization
+          if (!proxyFailed && enableOptimization && srcSet) {
+            setProxyFailed(true);
+            setImageError(false);
+            setInternalLoading(true);
+            setOptimizedUrl(null);
+            setResolvedUrl(url);
+            return;
+          }
+
+          // All fallback attempts failed - mediaLoader already tried all proxies
           setImageError(true);
           onError();
         }}

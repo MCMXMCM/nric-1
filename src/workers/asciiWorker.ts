@@ -170,6 +170,223 @@ const buildGlyphAtlas = (ramp: string, glyphW: number, glyphH: number) => {
   return { canvas, width: atlasW, height: atlasH };
 };
 
+// Shape vector computation for shape-based character selection
+// Sample 6 circular regions arranged in 2x3 grid (left/right, top/middle/bottom)
+const SHAPE_REGIONS = [
+  { x: 0.25, y: 0.20, radius: 0.15 }, // top-left
+  { x: 0.75, y: 0.20, radius: 0.15 }, // top-right
+  { x: 0.25, y: 0.50, radius: 0.15 }, // middle-left
+  { x: 0.75, y: 0.50, radius: 0.15 }, // middle-right
+  { x: 0.25, y: 0.80, radius: 0.15 }, // bottom-left
+  { x: 0.75, y: 0.80, radius: 0.15 }, // bottom-right
+];
+
+interface CharacterShape {
+  char: string;
+  shapeVector: number[]; // 6D normalized vector
+  density: number;       // fallback for flat regions
+}
+
+// Sample a circular region from image data and compute average lightness
+const sampleCircularRegion = (
+  imageData: ImageData,
+  centerX: number,
+  centerY: number,
+  radius: number,
+  width: number,
+  height: number
+): number => {
+  const cx = centerX * width;
+  const cy = centerY * height;
+  const r = radius * Math.min(width, height);
+  const rSq = r * r;
+  
+  let sum = 0;
+  let count = 0;
+  
+  // Sample points in a grid within the circle
+  const sampleRate = Math.max(1, Math.floor(r / 2));
+  for (let dy = -r; dy <= r; dy += sampleRate) {
+    for (let dx = -r; dx <= r; dx += sampleRate) {
+      const distSq = dx * dx + dy * dy;
+      if (distSq <= rSq) {
+        const x = Math.floor(cx + dx);
+        const y = Math.floor(cy + dy);
+        if (x >= 0 && x < width && y >= 0 && y < height) {
+          const idx = (y * width + x) * 4;
+          const r = imageData.data[idx];
+          const g = imageData.data[idx + 1];
+          const b = imageData.data[idx + 2];
+          // Convert to luminance (perceptual)
+          const lum = (0.299 * r + 0.587 * g + 0.114 * b) / 255.0;
+          sum += lum;
+          count++;
+        }
+      }
+    }
+  }
+  
+  return count > 0 ? sum / count : 0;
+};
+
+// Build character shape database with 6D shape vectors
+const buildCharacterShapeDatabase = (ramp: string, glyphW: number, glyphH: number): CharacterShape[] => {
+  const shapes: CharacterShape[] = [];
+  const canvas = new OffscreenCanvas(glyphW, glyphH);
+  const ctx = canvas.getContext('2d', { willReadFrequently: true })!;
+  
+  // Match font settings from buildGlyphAtlas
+  ctx.textBaseline = 'middle';
+  ctx.textAlign = 'center';
+  const fontPx = Math.floor(glyphH * 0.85);
+  ctx.font = `${fontPx}px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace`;
+  
+  for (const char of ramp) {
+    // Clear with black
+    ctx.fillStyle = '#000000';
+    ctx.fillRect(0, 0, glyphW, glyphH);
+    
+    // Draw character in white
+    ctx.fillStyle = '#ffffff';
+    ctx.fillText(char, glyphW * 0.5, glyphH * 0.5);
+    
+    const imageData = ctx.getImageData(0, 0, glyphW, glyphH);
+    
+    // Sample 6 regions to build shape vector
+    const shapeVector: number[] = [];
+    for (const region of SHAPE_REGIONS) {
+      const sample = sampleCircularRegion(
+        imageData,
+        region.x,
+        region.y,
+        region.radius,
+        glyphW,
+        glyphH
+      );
+      shapeVector.push(sample);
+    }
+    
+    // Compute density as average for fallback
+    const density = shapeVector.reduce((a, b) => a + b, 0) / 6;
+    shapes.push({ char, shapeVector, density });
+  }
+  
+  // Normalize shape vectors: divide each component by max value across all characters for that component
+  const componentMax: number[] = [0, 0, 0, 0, 0, 0];
+  for (const shape of shapes) {
+    for (let i = 0; i < 6; i++) {
+      if (shape.shapeVector[i] > componentMax[i]) {
+        componentMax[i] = shape.shapeVector[i];
+      }
+    }
+  }
+  
+  // Normalize each shape vector
+  for (const shape of shapes) {
+    for (let i = 0; i < 6; i++) {
+      if (componentMax[i] > 0) {
+        shape.shapeVector[i] = shape.shapeVector[i] / componentMax[i];
+      }
+    }
+  }
+  
+  return shapes;
+};
+
+// Contrast enhancement functions
+const applyGlobalContrast = (samplingVector: number[], exponent: number): number[] => {
+  const maxValue = Math.max(...samplingVector);
+  if (maxValue === 0) return samplingVector;
+  
+  return samplingVector.map(v => {
+    const normalized = v / maxValue;
+    const enhanced = Math.pow(normalized, exponent);
+    return enhanced * maxValue;
+  });
+};
+
+// Directional contrast enhancement - uses external sampling vector to detect edges
+// Each component of samplingVector is enhanced using affecting external values
+const applyDirectionalContrast = (
+  samplingVector: number[],
+  externalVector: number[], // 10 external samples (arranged around cell)
+  exponent: number
+): number[] => {
+  // Mapping: which external samples affect which internal component
+  // 0=top-left, 1=top-right, 2=middle-left, 3=middle-right, 4=bottom-left, 5=bottom-right
+  // External: [top-left, top-right, top-middle-left, top-middle-right, middle-left, middle-right, middle-bottom-left, middle-bottom-right, bottom-left, bottom-right]
+  const AFFECTING_EXTERNAL_INDICES = [
+    [0, 1, 2, 4], // top-left affected by top external samples
+    [0, 1, 3, 5], // top-right
+    [2, 4, 6],    // middle-left
+    [3, 5, 7],    // middle-right
+    [4, 6, 8, 9], // bottom-left
+    [5, 7, 8, 9], // bottom-right
+  ];
+  
+  return samplingVector.map((v, i) => {
+    let maxValue = v;
+    for (const extIdx of AFFECTING_EXTERNAL_INDICES[i]) {
+      if (extIdx < externalVector.length) {
+        maxValue = Math.max(maxValue, externalVector[extIdx]);
+      }
+    }
+    if (maxValue === 0) return v;
+    const normalized = v / maxValue;
+    return Math.pow(normalized, exponent) * maxValue;
+  });
+};
+
+// Euclidean distance for 6D shape vectors
+const euclideanDistance = (a: number[], b: number[]): number => {
+  let sum = 0;
+  for (let i = 0; i < Math.min(a.length, b.length); i++) {
+    const diff = a[i] - b[i];
+    sum += diff * diff;
+  }
+  return Math.sqrt(sum);
+};
+
+// Find best matching character using shape vector
+const findBestCharacter = (
+  samplingVector: number[],
+  shapes: CharacterShape[]
+): string => {
+  let bestChar = ' ';
+  let bestDistance = Infinity;
+  
+  for (const { char, shapeVector } of shapes) {
+    const dist = euclideanDistance(samplingVector, shapeVector);
+    if (dist < bestDistance) {
+      bestDistance = dist;
+      bestChar = char;
+    }
+  }
+  return bestChar;
+};
+
+// Cached lookup using quantized keys
+const QUANTIZE_BITS = 5; // 32 levels per component
+const lookupCache = new Map<number, string>();
+
+const getCacheKey = (vector: number[]): number => {
+  let key = 0;
+  for (let i = 0; i < 6; i++) {
+    const quantized = Math.min(31, Math.floor(vector[i] * 32));
+    key = (key << QUANTIZE_BITS) | quantized;
+  }
+  return key;
+};
+
+const findBestCharacterCached = (samplingVector: number[], shapes: CharacterShape[]): string => {
+  const key = getCacheKey(samplingVector);
+  if (lookupCache.has(key)) return lookupCache.get(key)!;
+  
+  const result = findBestCharacter(samplingVector, shapes);
+  lookupCache.set(key, result);
+  return result;
+};
+
 // GL helpers with resource tracking
 const createGl = (canvas: OffscreenCanvas) => {
   const gl = canvas.getContext('webgl', { alpha: true, antialias: false, premultipliedAlpha: false }) as WebGLRenderingContext | null;
@@ -400,6 +617,137 @@ const renderAsciiGl = (bitmap: ImageBitmap, opts: {
   gl.uniform1f(gl.getUniformLocation(pass1, 'u_rows'), rows);
   gl.drawArrays(gl.TRIANGLES, 0, 3);
 
+  // TEMPORARY: Disable shape-based rendering to fix black box issue
+  // Will re-enable after debugging
+  const useShapeBasedRendering = false;
+  
+  let charIndexTex: WebGLTexture | null = null;
+  
+  if (useShapeBasedRendering) {
+    // Build shape database and create character index map for shape-based rendering
+    try {
+      const shapes = buildCharacterShapeDatabase(opts.ramp, glyphW, glyphH);
+      const contrastExponent = 1.5; // Configurable contrast enhancement
+  
+  // Sample shape vectors from source and build character index map
+  const charIndexMap = new Uint8Array(cols * rows);
+  const sourceCanvas = new OffscreenCanvas(bitmap.width, bitmap.height);
+  const sourceCtx = sourceCanvas.getContext('2d')!;
+  sourceCtx.drawImage(bitmap, 0, 0);
+  const sourceImageData = sourceCtx.getImageData(0, 0, bitmap.width, bitmap.height);
+  
+  // Sample external regions for directional contrast (10 external samples per cell)
+  const EXTERNAL_REGIONS = [
+    { x: 0.25, y: -0.15 }, // top-left external
+    { x: 0.75, y: -0.15 }, // top-right external
+    { x: 0.15, y: 0.10 },  // top-middle-left
+    { x: 0.85, y: 0.10 },  // top-middle-right
+    { x: -0.15, y: 0.50 }, // middle-left
+    { x: 1.15, y: 0.50 },  // middle-right
+    { x: 0.15, y: 0.90 },  // middle-bottom-left
+    { x: 0.85, y: 0.90 },  // middle-bottom-right
+    { x: 0.25, y: 1.15 },  // bottom-left external
+    { x: 0.75, y: 1.15 },  // bottom-right external
+  ];
+  
+  for (let y = 0; y < rows; y++) {
+    for (let x = 0; x < cols; x++) {
+      const cellSizeX = bitmap.width / cols;
+      const cellSizeY = bitmap.height / rows;
+      const cellBaseX = x * cellSizeX;
+      const cellBaseY = y * cellSizeY;
+      
+      // Sample 6 internal regions for shape vector
+      // Convert cell-relative positions to normalized image coordinates [0,1]
+      const cellNormX = (x + 0.5) / cols;
+      const cellNormY = (y + 0.5) / rows;
+      const cellNormSizeX = 1.0 / cols;
+      const cellNormSizeY = 1.0 / rows;
+      
+      const shapeVector: number[] = [];
+      for (const region of SHAPE_REGIONS) {
+        // Region position relative to cell center, then convert to image coordinates
+        const normalizedX = cellNormX + (region.x - 0.5) * cellNormSizeX;
+        const normalizedY = cellNormY + (region.y - 0.5) * cellNormSizeY;
+        // Radius normalized relative to cell size, then to image size
+        const normalizedRadius = region.radius * Math.min(cellNormSizeX, cellNormSizeY);
+        const sample = sampleCircularRegion(
+          sourceImageData,
+          normalizedX,
+          normalizedY,
+          normalizedRadius,
+          bitmap.width,
+          bitmap.height
+        );
+        shapeVector.push(sample);
+      }
+      
+      // Sample external regions for directional contrast
+      const externalVector: number[] = [];
+      for (const region of EXTERNAL_REGIONS) {
+        const normalizedX = cellNormX + region.x * cellNormSizeX;
+        const normalizedY = cellNormY + region.y * cellNormSizeY;
+        const normalizedRadius = 0.15 * Math.min(cellNormSizeX, cellNormSizeY);
+        // Check bounds in normalized space
+        if (normalizedX >= 0 && normalizedX <= 1 && normalizedY >= 0 && normalizedY <= 1) {
+          const sample = sampleCircularRegion(
+            sourceImageData,
+            normalizedX,
+            normalizedY,
+            normalizedRadius,
+            bitmap.width,
+            bitmap.height
+          );
+          externalVector.push(sample);
+        } else {
+          externalVector.push(0); // Out of bounds
+        }
+      }
+      
+      // Apply contrast enhancement
+      let enhancedVector = applyGlobalContrast(shapeVector, contrastExponent);
+      enhancedVector = applyDirectionalContrast(enhancedVector, externalVector, contrastExponent);
+      
+      // Normalize to match shape vector normalization
+      const maxValue = Math.max(...enhancedVector);
+      if (maxValue > 0) {
+        // Re-normalize using the same normalization as shape vectors
+        // (Shape vectors are already normalized component-wise by max across all chars)
+        // Here we just ensure values are in [0,1] range
+        enhancedVector = enhancedVector.map(v => Math.min(1.0, v / maxValue));
+      }
+      
+      // Find best matching character
+      const bestChar = findBestCharacterCached(enhancedVector, shapes);
+      const charIndex = opts.ramp.indexOf(bestChar);
+      charIndexMap[y * cols + x] = charIndex >= 0 ? charIndex : 0;
+    }
+  }
+  
+  // Create character index texture
+  const charIndexCanvas = new OffscreenCanvas(cols, rows);
+  const charIndexCtx = charIndexCanvas.getContext('2d')!;
+  const charIndexImageData = charIndexCtx.createImageData(cols, rows);
+  for (let i = 0; i < charIndexMap.length; i++) {
+    const idx = charIndexMap[i];
+    const byteIdx = i * 4;
+    // Encode index as grayscale (0-255 maps to ramp indices)
+    const normalized = idx / (opts.ramp.length - 1);
+    const gray = Math.floor(normalized * 255);
+    charIndexImageData.data[byteIdx] = gray;
+    charIndexImageData.data[byteIdx + 1] = gray;
+    charIndexImageData.data[byteIdx + 2] = gray;
+    charIndexImageData.data[byteIdx + 3] = 255;
+  }
+      charIndexCtx.putImageData(charIndexImageData, 0, 0);
+      charIndexTex = createTextureFromCanvas(charIndexCanvas);
+      wlog('character index map created', { cols, rows });
+    } catch (err) {
+      wlog('Shape-based rendering failed, falling back to luminance-based', String(err));
+      charIndexTex = null;
+    }
+  }
+
   // Pass 2: render ASCII using atlas and grid texture
   const pass2VS = `
     attribute vec2 a_pos;
@@ -413,6 +761,7 @@ const renderAsciiGl = (bitmap: ImageBitmap, opts: {
     precision highp float;
     varying vec2 v_fragCoord; // 0..1
     uniform sampler2D u_grid; // cols x rows RGB
+    uniform sampler2D u_charIndex; // cols x rows grayscale (character indices) - optional
     uniform sampler2D u_atlas; // glyph atlas row
     uniform float u_cols;
     uniform float u_rows;
@@ -422,6 +771,7 @@ const renderAsciiGl = (bitmap: ImageBitmap, opts: {
     uniform float u_atlasH;
     uniform float u_rampCount;
     uniform bool u_useColor;
+    uniform bool u_useShapeBased; // Whether to use shape-based character selection
 
     float luminance(vec3 c){
       // Perceptual luma
@@ -466,13 +816,19 @@ const renderAsciiGl = (bitmap: ImageBitmap, opts: {
       rgbAdj = clamp(applySaturation(rgbAdj, saturation), 0.0, 1.0);
       float lum = luminance(rgbAdj);
       
-      // Minimal dithering to prevent banding while avoiding line artifacts
-      float noise = fract(sin(dot(cellCoord, vec2(12.9898, 78.233))) * 43758.5453);
-      lum = clamp(lum + (noise - 0.5) * 0.005, 0.0, 1.0); // further reduced noise
-      
-      // Bias toward slightly lighter glyphs for readability
-      float lumMapped = pow(lum, 0.95);
-      float rampIndex = floor(clamp(lumMapped * (u_rampCount - 1.0), 0.0, u_rampCount - 1.0));
+      // Choose character based on mode
+      float rampIndex;
+      if (u_useShapeBased) {
+        // Get character index from shape-based selection (encoded as grayscale)
+        float charIndexGray = texture2D(u_charIndex, cellUV).r;
+        rampIndex = floor(clamp(charIndexGray * (u_rampCount - 1.0), 0.0, u_rampCount - 1.0));
+      } else {
+        // Original luminance-based selection
+        float noise = fract(sin(dot(cellCoord, vec2(12.9898, 78.233))) * 43758.5453);
+        lum = clamp(lum + (noise - 0.5) * 0.005, 0.0, 1.0);
+        float lumMapped = pow(lum, 0.95);
+        rampIndex = floor(clamp(lumMapped * (u_rampCount - 1.0), 0.0, u_rampCount - 1.0));
+      }
       
       // Calculate precise local coordinates within the glyph cell
       vec2 localPixel = mod(outputPixel, vec2(u_glyphW, u_glyphH));
@@ -511,10 +867,24 @@ const renderAsciiGl = (bitmap: ImageBitmap, opts: {
   gl.bindTexture(gl.TEXTURE_2D, gridRT.tex);
   const uGridLoc = gl.getUniformLocation(pass2, 'u_grid');
   gl.uniform1i(uGridLoc, 0);
-  gl.activeTexture(gl.TEXTURE1);
-  gl.bindTexture(gl.TEXTURE_2D, atlasTex);
-  const uAtlasLoc = gl.getUniformLocation(pass2, 'u_atlas');
-  gl.uniform1i(uAtlasLoc, 1);
+  
+  // Bind character index texture if shape-based rendering is enabled
+  if (useShapeBasedRendering && charIndexTex) {
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, charIndexTex);
+    const uCharIndexLoc = gl.getUniformLocation(pass2, 'u_charIndex');
+    gl.uniform1i(uCharIndexLoc, 1);
+    gl.activeTexture(gl.TEXTURE2);
+    gl.bindTexture(gl.TEXTURE_2D, atlasTex);
+    const uAtlasLoc = gl.getUniformLocation(pass2, 'u_atlas');
+    gl.uniform1i(uAtlasLoc, 2);
+  } else {
+    // Original texture binding without character index
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, atlasTex);
+    const uAtlasLoc = gl.getUniformLocation(pass2, 'u_atlas');
+    gl.uniform1i(uAtlasLoc, 1);
+  }
   // Set uniforms
   gl.uniform1f(gl.getUniformLocation(pass2, 'u_cols'), cols);
   gl.uniform1f(gl.getUniformLocation(pass2, 'u_rows'), rows);
@@ -524,6 +894,7 @@ const renderAsciiGl = (bitmap: ImageBitmap, opts: {
   gl.uniform1f(gl.getUniformLocation(pass2, 'u_atlasH'), atlasH);
   gl.uniform1f(gl.getUniformLocation(pass2, 'u_rampCount'), opts.ramp.length);
   gl.uniform1i(gl.getUniformLocation(pass2, 'u_useColor'), opts.useColor ? 1 : 0);
+  gl.uniform1i(gl.getUniformLocation(pass2, 'u_useShapeBased'), (useShapeBasedRendering && charIndexTex) ? 1 : 0);
   gl.drawArrays(gl.TRIANGLES, 0, 3);
 
   // Ensure all draws are finished before snapshot

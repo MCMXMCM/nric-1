@@ -29,7 +29,7 @@ class QueryThrottleManager {
   }> = [];
   
   private config: ThrottleConfig = {
-    maxFeedQueries: 3,
+    maxFeedQueries: 4, // Increased from 3 to 4 for better throughput
     maxMetadataQueries: 5,
     maxProfileQueries: 2,
     maxDiscoveryQueries: 1,

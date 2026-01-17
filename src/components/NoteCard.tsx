@@ -133,12 +133,39 @@ const NoteCardComponent: React.FC<NoteCardProps> = ({
 
   // Pool ref for note fetching
   const poolRef = useRef<RelayConnectionPool | null>(null);
+  
+  // Throttle prefetch calls to reduce CPU usage
+  const lastPrefetchTimeRef = useRef<number>(0);
+  const prefetchTimeoutRef = useRef<number | null>(null);
+  const isScrollingRef = useRef<boolean>(false);
 
   // Initialize pool
   React.useEffect(() => {
     if (!poolRef.current) {
       poolRef.current = getGlobalRelayPool();
     }
+  }, []);
+
+  // Track scroll state to skip prefetch during active scrolling
+  useEffect(() => {
+    let scrollTimeout: number | null = null;
+    const handleScroll = () => {
+      isScrollingRef.current = true;
+      if (scrollTimeout) clearTimeout(scrollTimeout);
+      scrollTimeout = window.setTimeout(() => {
+        isScrollingRef.current = false;
+      }, 150);
+    };
+
+    window.addEventListener('scroll', handleScroll, { passive: true });
+    return () => {
+      window.removeEventListener('scroll', handleScroll);
+      if (scrollTimeout) clearTimeout(scrollTimeout);
+      // Cleanup prefetch timeout on unmount
+      if (prefetchTimeoutRef.current) {
+        clearTimeout(prefetchTimeoutRef.current);
+      }
+    };
   }, []);
 
   // Build augmented relays function (same as NoteView)
@@ -813,6 +840,44 @@ const NoteCardComponent: React.FC<NoteCardProps> = ({
       className="note-card"
       data-note-id={note.id}
       onMouseEnter={() => {
+        // Skip prefetch if user is actively scrolling
+        if (isScrollingRef.current) return;
+        
+        const now = Date.now();
+        const timeSinceLastPrefetch = now - lastPrefetchTimeRef.current;
+        
+        // Throttle: only prefetch if 300ms have passed since last prefetch
+        if (timeSinceLastPrefetch < 300) {
+          // Clear existing timeout and schedule new one
+          if (prefetchTimeoutRef.current) {
+            clearTimeout(prefetchTimeoutRef.current);
+          }
+          prefetchTimeoutRef.current = window.setTimeout(() => {
+            const rootId = rootNoteId || note.id;
+            const parent = note.id;
+            prefetchThread({
+              rootId,
+              parentId: parent,
+              relayUrls: readRelayUrls || [],
+              nostrClient,
+              maxFetch: 150,
+              timeBudget: 700,
+            });
+            if (parentNoteId) {
+              prefetchThread({
+                rootId: rootId,
+                parentId: parentNoteId,
+                relayUrls: readRelayUrls || [],
+                nostrClient,
+                maxFetch: 120,
+                timeBudget: 600,
+              });
+            }
+            lastPrefetchTimeRef.current = Date.now();
+          }, 300 - timeSinceLastPrefetch);
+          return;
+        }
+        
         // Prefetch thread: use root if present, otherwise note as root
         const rootId = rootNoteId || note.id;
         const parent = note.id;
@@ -835,8 +900,20 @@ const NoteCardComponent: React.FC<NoteCardProps> = ({
             timeBudget: 600,
           });
         }
+        lastPrefetchTimeRef.current = now;
       }}
       onTouchStart={() => {
+        // Skip prefetch if user is actively scrolling
+        if (isScrollingRef.current) return;
+        
+        const now = Date.now();
+        const timeSinceLastPrefetch = now - lastPrefetchTimeRef.current;
+        
+        // Throttle: only prefetch if 300ms have passed since last prefetch
+        if (timeSinceLastPrefetch < 300) {
+          return;
+        }
+        
         const rootId = rootNoteId || note.id;
         const parent = note.id;
         prefetchThread({
@@ -847,6 +924,7 @@ const NoteCardComponent: React.FC<NoteCardProps> = ({
           maxFetch: 150,
           timeBudget: 700,
         });
+        lastPrefetchTimeRef.current = now;
       }}
       style={{
         // backgroundColor:

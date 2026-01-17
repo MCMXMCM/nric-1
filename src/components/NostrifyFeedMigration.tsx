@@ -84,7 +84,7 @@ const FeedContentWithConditionalPadding: React.FC<{
         overflow: "hidden", // Use hidden to clip any content that tries to escape the container
         // Add top padding on desktop equal to FeedControls height so the
         // first item never aligns flush to the top when navigating with hotkeys
-        paddingTop: isMobile ? "0" : "2.5rem",
+        paddingTop: 0,
         paddingBottom: isMobile
           ? "calc(60px + var(--safe-area-inset-bottom, 0))"
           : "0",
@@ -785,7 +785,7 @@ const NostrifyFeedMigration: React.FC = () => {
     currentIndex: 0,
     relayUrls: readRelays,
     enabled: true,
-    prefetchWindow: 5,
+    prefetchWindow: 10,
     nostrClient: legacyContext?.nostrClient,
     myPubkey: legacyContext?.pk,
   });

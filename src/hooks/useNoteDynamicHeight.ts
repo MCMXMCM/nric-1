@@ -5,6 +5,7 @@ import { extractImageUrls, extractVideoUrls, removeMediaUrls } from "../utils/no
 interface NoteDynamicHeightOptions {
   isMobile: boolean;
   imageMode: boolean;
+  useAscii?: boolean;
   showFullContent?: boolean;
   onHeightChange?: (noteId: string, newHeight: number) => void;
 }
@@ -27,7 +28,7 @@ interface NoteDimensions {
 }
 
 export const useNoteDynamicHeight = (options: NoteDynamicHeightOptions) => {
-  const { isMobile, imageMode, showFullContent = false, onHeightChange } = options;
+  const { isMobile, imageMode, useAscii = false, showFullContent = false, onHeightChange } = options;
 
   // Store actual image dimensions for dynamic sizing
   const imageDimensionsCache = useRef<Map<string, ImageDimensions>>(new Map());
@@ -47,6 +48,8 @@ export const useNoteDynamicHeight = (options: NoteDynamicHeightOptions) => {
   const MOBILE_BUFFER = isMobile ? 8 : 0; // Minimal buffer for mobile layout spacing
   // Additional spacing between media and text on mobile
   const MOBILE_MEDIA_TEXT_SPACING = isMobile ? 16 : 0; // Account for gap between media and text
+  // Desktop content padding buffer to account for container padding and margins
+  const DESKTOP_CONTENT_BUFFER = isMobile ? 0 : 60; // Extra space for desktop padding/margins
   // Repost/quote baseline sizing to reduce early reflow on initial load
   const REPOST_BASE_MIN = isMobile ? 620 : 520;
   const REPOST_WITH_MEDIA_EXTRA = isMobile ? 260 : 220;
@@ -63,47 +66,13 @@ export const useNoteDynamicHeight = (options: NoteDynamicHeightOptions) => {
     }
   };
 
-  // Calculate optimal layout dimensions for images based on count and aspect ratios
-  const calculateOptimalImageHeight = useCallback(
-    (imageUrls: string[], hasText: boolean, containerWidth?: number): number => {
-      if (!imageUrls.length) return 0;
-
-      // Get actual dimensions from cache if available
-      const actualDimensions = imageUrls
-        .map(url => imageDimensionsCache.current.get(url))
-        .filter(Boolean) as ImageDimensions[];
-
-      // Use actual dimensions if we have them for all images
-      if (actualDimensions.length === imageUrls.length && containerWidth) {
-        return calculateDynamicImageHeight(actualDimensions, imageUrls.length, hasText, containerWidth);
-      }
-
-      // Fallback to estimated heights - be more generous for natural sizing
-      if (isMobile) {
-        // Mobile: Much more generous estimates for natural aspect ratios
-        if (hasText && imageMode) {
-          // When text is present, images might be tall (like screenshots)
-          return containerWidth ? Math.min(containerWidth * 1.2, 600) : 400;
-        } else {
-          // Image-only notes can be very tall (like full screenshots)
-          return containerWidth ? Math.min(containerWidth * 1.5, 800) : 500;
-        }
-      } else {
-        // Desktop: More generous estimates for natural sizing
-        if (hasText && imageMode) {
-          return 400; // Increased for natural aspect ratios
-        } else {
-          return 600; // Much more generous for image-only notes
-        }
-      }
-    },
-    [isMobile, imageMode]
-  );
-
   // Calculate dynamic height based on actual image dimensions and layout
   const calculateDynamicImageHeight = useCallback(
     (dimensions: ImageDimensions[], imageCount: number, hasText: boolean, containerWidth: number): number => {
       if (!dimensions.length) return 0;
+
+      // ASCII images have a fixed max height of 600px on desktop
+      const ASCII_MAX_HEIGHT = 600;
 
       const availableWidth = containerWidth * (hasText && !isMobile ? 0.5 : 1); // 50% width when text is present on desktop
       const gap = 2; // Gap between images in grid
@@ -111,7 +80,26 @@ export const useNoteDynamicHeight = (options: NoteDynamicHeightOptions) => {
       switch (imageCount) {
         case 1: {
           const { aspectRatio } = dimensions[0];
-          // Much more flexible max height for single images to accommodate natural sizing
+          
+          // For ASCII images on desktop, calculate the actual rendered height
+          // considering container padding and aspect ratio constraints
+          if (useAscii && !isMobile) {
+            const CONTAINER_PADDING = 8; // 4px × 2 (padding on outer container)
+            const effectiveWidth = availableWidth - CONTAINER_PADDING;
+            const naturalHeight = effectiveWidth / aspectRatio;
+            
+            if (naturalHeight <= ASCII_MAX_HEIGHT) {
+              // Image fits within max height - use natural height
+              return naturalHeight;
+            } else {
+              // Image would exceed max height
+              // With corrected displayAspect = effectiveWidth / maxHeight
+              // The rendered height will be: effectiveWidth × (maxHeight / effectiveWidth) = maxHeight
+              return ASCII_MAX_HEIGHT;
+            }
+          }
+          
+          // Non-ASCII or mobile: use standard calculation
           const maxHeight = isMobile ? (hasText ? 600 : 800) : 700;
           const naturalHeight = availableWidth / aspectRatio;
           return Math.min(naturalHeight, maxHeight);
@@ -148,7 +136,52 @@ export const useNoteDynamicHeight = (options: NoteDynamicHeightOptions) => {
         }
       }
     },
-    [isMobile]
+    [isMobile, useAscii]
+  );
+
+  // Calculate optimal layout dimensions for images based on count and aspect ratios
+  const calculateOptimalImageHeight = useCallback(
+    (imageUrls: string[], hasText: boolean, containerWidth?: number): number => {
+      if (!imageUrls.length) return 0;
+
+      // ASCII images have a fixed max height of 600px on desktop
+      const ASCII_MAX_HEIGHT = 600;
+
+      // Get actual dimensions from cache if available
+      const actualDimensions = imageUrls
+        .map(url => imageDimensionsCache.current.get(url))
+        .filter(Boolean) as ImageDimensions[];
+
+      // Use actual dimensions if we have them for all images
+      if (actualDimensions.length === imageUrls.length && containerWidth) {
+        return calculateDynamicImageHeight(actualDimensions, imageUrls.length, hasText, containerWidth);
+      }
+
+      // When ASCII mode is enabled, use ASCII max height constraint
+      if (useAscii && !isMobile) {
+        return ASCII_MAX_HEIGHT;
+      }
+
+      // Fallback to estimated heights - be more generous for natural sizing
+      if (isMobile) {
+        // Mobile: Much more generous estimates for natural aspect ratios
+        if (hasText && imageMode) {
+          // When text is present, images might be tall (like screenshots)
+          return containerWidth ? Math.min(containerWidth * 1.2, 600) : 400;
+        } else {
+          // Image-only notes can be very tall (like full screenshots)
+          return containerWidth ? Math.min(containerWidth * 1.5, 800) : 500;
+        }
+      } else {
+        // Desktop: More generous estimates for natural sizing
+        if (hasText && imageMode) {
+          return 400; // Increased for natural aspect ratios
+        } else {
+          return 600; // Much more generous for image-only notes
+        }
+      }
+    },
+    [isMobile, imageMode, useAscii, calculateDynamicImageHeight]
   );
 
   // Calculate video placeholder height
@@ -263,6 +296,9 @@ export const useNoteDynamicHeight = (options: NoteDynamicHeightOptions) => {
 
       // Add mobile buffer for better visibility
       totalHeight += MOBILE_BUFFER;
+      
+      // Add desktop content buffer to account for padding and margins
+      totalHeight += DESKTOP_CONTENT_BUFFER;
 
       // Ensure a stronger baseline for repost/quote notes to avoid later jumps
       if (imageMode && repostLike) {
@@ -297,6 +333,7 @@ export const useNoteDynamicHeight = (options: NoteDynamicHeightOptions) => {
       MIN_NOTE_HEIGHT,
       MAX_NOTE_HEIGHT,
       MOBILE_BUFFER,
+      DESKTOP_CONTENT_BUFFER,
     ]
   );
 
@@ -482,6 +519,7 @@ export const useNoteDynamicHeight = (options: NoteDynamicHeightOptions) => {
       MIN_NOTE_HEIGHT,
       MAX_NOTE_HEIGHT,
       MOBILE_BUFFER,
+      DESKTOP_CONTENT_BUFFER,
     ]
   );
 

@@ -1,14 +1,11 @@
-import React, { useState, useCallback, useMemo } from "react";
+import React, { useState, useCallback } from "react";
 import { extractImageUrls, extractVideoUrls } from "../utils/nostr/utils";
 import AsciiRendererV2 from "./AsciiRendererV2";
 import LoadingSpinner from "./ui/LoadingSpinner";
 import NostrLinkText from "./NostrLinkText";
 import { CORSImage } from "./media/CORSImage";
 import { MediaGallery } from "./media/MediaGallery";
-import LinkPreviewGallery from "./LinkPreview/LinkPreviewGallery";
 import { formatMediaUrl } from "../utils/formatMediaUrl";
-import { useLinkPreviews } from "../hooks/useLinkPreviews";
-import { extractNonMediaUrls } from "../utils/linkPreview";
 
 interface NoteContentRendererProps {
   content: string;
@@ -35,9 +32,6 @@ interface NoteContentRendererProps {
     imageUrl: string,
     dimensions: { width: number; height: number }
   ) => void;
-  // Link preview props
-  showLinkPreviews?: boolean;
-  maxLinkPreviewsToShow?: number;
 }
 
 const NoteContentRenderer: React.FC<NoteContentRendererProps> = ({
@@ -61,9 +55,6 @@ const NoteContentRenderer: React.FC<NoteContentRendererProps> = ({
   onAsciiRendered = () => {},
   onMediaLoadError = () => {},
   onImageDimensionsLoaded = () => {},
-  // Link preview props
-  showLinkPreviews = true,
-  maxLinkPreviewsToShow = 3,
 }) => {
   // Detect mobile device
   const isMobile = typeof window !== "undefined" && window.innerWidth <= 768;
@@ -74,27 +65,6 @@ const NoteContentRenderer: React.FC<NoteContentRendererProps> = ({
 
   const imageUrls = extractImageUrls(content);
   const videoUrls = extractVideoUrls(content);
-
-  // Fetch link previews for non-media URLs
-  const { linkPreviews, isLoading: isLoadingPreviews } = useLinkPreviews(
-    content,
-    showLinkPreviews
-  );
-
-  // Extract non-media URLs for preview gallery
-  const linkUrls = extractNonMediaUrls(content);
-
-  // Create a Set of URLs that have successfully loaded previews
-  const loadedPreviewUrls = useMemo(() => {
-    const loaded = new Set<string>();
-    linkPreviews.forEach((metadata, url) => {
-      // Only include URLs that have actual metadata (not null/error)
-      if (metadata) {
-        loaded.add(url);
-      }
-    });
-    return loaded;
-  }, [linkPreviews]);
 
   const handleImageClick = useCallback(
     (url: string) => {
@@ -205,7 +175,6 @@ const NoteContentRenderer: React.FC<NoteContentRendererProps> = ({
           onHashtagClick={onHashtagClick}
           renderNoteLinkAsThread={renderNoteLinkAsThread}
           noteLinkLabel={noteLinkLabel}
-          loadedPreviewUrls={loadedPreviewUrls}
         />
       );
     });
@@ -325,16 +294,6 @@ const NoteContentRenderer: React.FC<NoteContentRendererProps> = ({
           isInFeed={false} // We're in thread view, not feed
           fixedHeight={undefined}
           imageMode={imageMode}
-        />
-      )}
-      {/* Render link previews for non-media URLs */}
-      {showLinkPreviews && linkUrls.length > 0 && (
-        <LinkPreviewGallery
-          linkUrls={linkUrls}
-          linkMetadata={linkPreviews}
-          isLoading={isLoadingPreviews}
-          compact={isMobile}
-          maxPreviewsToShow={maxLinkPreviewsToShow}
         />
       )}
     </div>

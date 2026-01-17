@@ -272,8 +272,6 @@ const MainNote: React.FC<MainNoteProps> = ({
                   onAsciiRendered={onAsciiRendered}
                   onMediaLoadError={onMediaLoadError}
                   onImageDimensionsLoaded={onImageDimensionsLoaded}
-                  showLinkPreviews={true}
-                  maxLinkPreviewsToShow={3}
                   style={{
                     color: "var(--text-color)",
                     fontSize: "0.875rem",

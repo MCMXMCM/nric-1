@@ -34,7 +34,7 @@ class MediaLoader {
       // Nostr-specific image proxies (higher priority)
       {
         url: 'https://imgproxy.nostr.build/insecure/plain/',
-        timeout: 8000,
+        timeout: 4000,
         priority: 1,
         domains: ['nostr.build', 'image.nostr.build']
       },
@@ -52,7 +52,7 @@ class MediaLoader {
       // Fallback proxies (lower priority due to reliability issues)
       {
         url: 'https://corsproxy.io/?',
-        timeout: 5000,
+        timeout: 6000,
         priority: 4
       }
     ];
@@ -66,8 +66,8 @@ class MediaLoader {
       if (corsMode === 'anonymous') {
         img.crossOrigin = 'anonymous';
       }
-      img.referrerPolicy = 'no-referrer';
-      img.loading = 'lazy';
+      // NOTE: Do NOT set loading='lazy' on programmatic Image() objects
+      // Lazy loading is viewport-based and doesn't work for detached images
       img.decoding = 'async';
 
       const timeoutId = setTimeout(() => {
@@ -208,8 +208,27 @@ class MediaLoader {
   }
 
   private async performLoad(url: string): Promise<MediaLoadResult> {
+    const MAX_TOTAL_TIME = 15000; // 15 seconds to allow slow proxies time to respond
+    const startTime = Date.now();
+    
+    // Helper to check remaining time
+    const getRemainingTime = () => Math.max(0, MAX_TOTAL_TIME - (Date.now() - startTime));
+    
+    // Helper to create failure result
+    const createFailureResult = (errorMsg: string): MediaLoadResult => ({
+      success: false,
+      url,
+      error: errorMsg
+    });
+
     // Try direct load first with CORS
-    const directResult = await this.loadWithTimeout(url, 6000, false, 'anonymous');
+    const directTimeout = Math.min(5000, getRemainingTime());
+    if (directTimeout <= 0) {
+      return createFailureResult('Timeout: No time remaining for direct load');
+    }
+    
+    const directResult = await this.loadWithTimeout(url, directTimeout, false, 'anonymous');
+    console.log(`[MediaLoader] Direct load result for ${url.slice(0, 50)}...:`, directResult.error || 'success');
     if (directResult.success) {
       this.loadedImages.add(url);
       this.resolvedUrls.set(url, url);
@@ -223,22 +242,92 @@ class MediaLoader {
 
     // If CORS failed, try without CORS before trying proxies
     if (directResult.error === 'CORS error' || directResult.error === 'Load failed') {
-      const noCorsResult = await this.loadWithTimeout(url, 6000, false, 'none');
-      if (noCorsResult.success) {
-        this.loadedImages.add(url);
-        this.resolvedUrls.set(url, url);
-        return { ...noCorsResult, method: 'direct-no-cors' as any };
+      const noCorsTimeout = Math.min(2000, getRemainingTime()); // Reduced from 4000 to 2000
+      if (noCorsTimeout > 0) {
+        const noCorsResult = await this.loadWithTimeout(url, noCorsTimeout, false, 'none');
+        if (noCorsResult.success) {
+          this.loadedImages.add(url);
+          this.resolvedUrls.set(url, url);
+          return { ...noCorsResult, method: 'direct-no-cors' as any };
+        }
       }
     }
 
-    // If direct load fails with certain errors, try proxies
-    if (directResult.error === 'CORS error' || directResult.error === 'Unauthorized' || directResult.error === 'Load failed' || directResult.error === 'SSL certificate error' || directResult.error === 'SSL/Network error') {
+    // If direct load fails with certain errors, try proxies in parallel (racing)
+    // Include 'Timeout' to handle slow-loading images that might load faster through a proxy
+    if (directResult.error === 'CORS error' || directResult.error === 'Unauthorized' || directResult.error === 'Load failed' || directResult.error === 'SSL certificate error' || directResult.error === 'SSL/Network error' || directResult.error === 'Timeout') {
       const optimalProxies = this.getOptimalProxies(url);
+      const remaining = getRemainingTime();
       
-      for (const proxyConfig of optimalProxies) {
+      // Need at least 1000ms to attempt proxies in parallel
+      if (remaining > 1000) {
+        // Try top 3 proxies in parallel (racing)
+        const topProxies = optimalProxies.slice(0, 3);
+        console.log(`[MediaLoader] Trying ${topProxies.length} proxies for ${url.slice(0, 50)}..., remaining time: ${remaining}ms`);
+        const proxyPromises = topProxies.map(async (proxyConfig) => {
+          try {
+            const proxyUrl = this.constructProxyUrl(proxyConfig, url);
+            const proxyTimeout = Math.min(proxyConfig.timeout, remaining);
+            console.log(`[MediaLoader] Trying proxy ${proxyConfig.url.slice(0, 30)}... timeout: ${proxyTimeout}ms`);
+            const proxyResult = await this.loadWithTimeout(proxyUrl, proxyTimeout, true);
+            console.log(`[MediaLoader] Proxy ${proxyConfig.url.slice(0, 30)}... result:`, proxyResult.error || 'success');
+            
+            // Update proxy statistics
+            this.updateProxyStats(proxyConfig.url, proxyResult.success);
+            
+            return {
+              success: proxyResult.success,
+              result: proxyResult,
+              proxyUrl,
+              config: proxyConfig
+            };
+          } catch (error) {
+            console.log(`[MediaLoader] Proxy ${proxyConfig.url.slice(0, 30)}... threw error:`, error);
+            // Update proxy statistics for failed attempts
+            this.updateProxyStats(proxyConfig.url, false);
+            return {
+              success: false,
+              result: null,
+              proxyUrl: null,
+              config: proxyConfig
+            };
+          }
+        });
+        
+        // Race the proxies - use first successful result
+        try {
+          const results = await Promise.allSettled(proxyPromises);
+          
+          // Find first successful result
+          for (const settled of results) {
+            if (settled.status === 'fulfilled' && settled.value.success) {
+              const { result, proxyUrl } = settled.value;
+              this.loadedImages.add(url);
+              this.resolvedUrls.set(url, proxyUrl!);
+              return {
+                ...result!,
+                url: proxyUrl!,
+                method: 'proxy'
+              };
+            }
+          }
+        } catch (error) {
+          // If Promise.allSettled fails (shouldn't happen), fall through to sequential fallback
+        }
+      }
+      
+      // Fallback: try remaining proxies sequentially if parallel racing failed
+      const remainingProxies = optimalProxies.slice(3);
+      for (const proxyConfig of remainingProxies) {
+        const remainingTime = getRemainingTime();
+        if (remainingTime <= 500) {
+          break;
+        }
+        
         try {
           const proxyUrl = this.constructProxyUrl(proxyConfig, url);
-          const proxyResult = await this.loadWithTimeout(proxyUrl, proxyConfig.timeout, true);
+          const proxyTimeout = Math.min(proxyConfig.timeout, remainingTime);
+          const proxyResult = await this.loadWithTimeout(proxyUrl, proxyTimeout, true);
           
           // Update proxy statistics
           this.updateProxyStats(proxyConfig.url, proxyResult.success);
@@ -275,11 +364,8 @@ class MediaLoader {
   }
 
   // Preload multiple images in the background without blocking
+  // Re-enabled with viewport awareness and throttling to prevent CPU churn
   async preloadImages(urls: string[]): Promise<void> {
-    // Disabled globally: batch prefetching removed to prevent idle CPU churn
-    // and unnecessary network activity across all platforms.
-    return;
-
     // Filter out URLs that are already loaded or failed
     const urlsToPreload = urls.filter(url => 
       !this.loadedImages.has(url) && 
@@ -289,41 +375,54 @@ class MediaLoader {
 
     if (urlsToPreload.length === 0) return;
 
-    // Reduce batch size to be more gentle on servers
-    const batchSize = 3;
-    const batches: string[][] = [];
+    // Limit concurrent preloads to 2 to prevent overwhelming the network
+    const maxConcurrent = 2;
+    const batchSize = maxConcurrent;
     
-    for (let i = 0; i < urlsToPreload.length; i += batchSize) {
-      batches.push(urlsToPreload.slice(i, i + batchSize));
-    }
-    
-    // Process batches with longer delays between them
-    for (let i = 0; i < batches.length; i++) {
-      const batch = batches[i];
-      
-      // Process batch in parallel with timeout
+    // Use requestIdleCallback for background loading when available
+    const schedulePreload = (callback: () => void) => {
+      if ('requestIdleCallback' in window) {
+        requestIdleCallback(callback, { timeout: 2000 });
+      } else {
+        // Fallback to setTimeout with small delay
+        setTimeout(callback, 100);
+      }
+    };
+
+    // Process in small batches with delays
+    const processBatch = async (batch: string[]) => {
       const batchPromises = batch.map(async (url) => {
         try {
-          // Add random delay to stagger requests
-          await new Promise(resolve => setTimeout(resolve, Math.random() * 500));
-          
           const result = await this.loadMedia(url);
           if (!result.success) {
-            console.warn(`[MediaLoader] Failed to preload: ${url.slice(0, 50)}... (${result.error})`);
+            // Silently fail for preloads - don't spam console
+            return result;
           }
           return result;
         } catch (error) {
-          console.warn(`[MediaLoader] Preload error for ${url.slice(0, 50)}...:`, error);
+          // Silently fail for preloads
           return { success: false, url, error: 'Preload failed' };
         }
       });
       
-      // Wait for current batch to complete before starting next batch
       await Promise.allSettled(batchPromises);
+    };
+
+    // Schedule batches with delays between them
+    for (let i = 0; i < urlsToPreload.length; i += batchSize) {
+      const batch = urlsToPreload.slice(i, i + batchSize);
       
-      // Longer delay between batches to prevent server overload
-      if (i < batches.length - 1) {
-        await new Promise(resolve => setTimeout(resolve, 500 + Math.random() * 500));
+      if (i === 0) {
+        // Process first batch immediately
+        await processBatch(batch);
+      } else {
+        // Schedule subsequent batches with delay
+        schedulePreload(async () => {
+          await processBatch(batch);
+        });
+        
+        // Small delay between scheduling batches
+        await new Promise(resolve => setTimeout(resolve, 200));
       }
     }
   }

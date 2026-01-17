@@ -310,12 +310,21 @@ export class RelayConnectionPool {
    * Start periodic health monitoring of connections
    */
   private startHealthMonitoring(): void {
+    // Use longer interval on mobile to reduce CPU usage
+    const isMobile = typeof window !== 'undefined' && window.innerWidth <= 768;
+    const interval = isMobile ? 90000 : 60000; // 90s on mobile, 60s on desktop (increased from 30s)
+    
     this.healthCheckInterval = setInterval(() => {
       if (this.isDestroyed) return;
 
+      // Skip health checks when app is backgrounded (Page Visibility API)
+      if (typeof document !== 'undefined' && document.hidden) {
+        return;
+      }
+
       // Check health of active connections
       this.performHealthCheck();
-    }, 30000); // Check every 30 seconds
+    }, interval);
   }
 
   /**

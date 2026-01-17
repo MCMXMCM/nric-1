@@ -2,6 +2,7 @@ import type { Metadata } from '../../types/nostr/types';
 
 const DISPLAY_NAMES_STORAGE_KEY = 'nostr_user_display_names';
 const DISPLAY_NAMES_CACHE_DURATION = 7 * 24 * 60 * 60 * 1000; // 7 days
+const MEMORY_CACHE_TTL = 60 * 1000; // Refresh from localStorage every 60s
 
 interface StoredDisplayName {
   pubkey: string;
@@ -15,8 +16,12 @@ interface DisplayNameCache {
   [pubkey: string]: StoredDisplayName;
 }
 
-// Load display names from localStorage
-export const loadDisplayNamesFromStorage = (): DisplayNameCache => {
+// Module-level in-memory cache
+let memoryCache: DisplayNameCache | null = null;
+let memoryCacheTimestamp: number = 0;
+
+// Internal function to load from localStorage (used by memory cache)
+const loadDisplayNamesFromStorageInternal = (): DisplayNameCache => {
   try {
     // Check if localStorage is available
     if (typeof window === 'undefined' || !window.localStorage) {
@@ -50,6 +55,27 @@ export const loadDisplayNamesFromStorage = (): DisplayNameCache => {
   }
 };
 
+// Get memory cache, refreshing from localStorage if needed
+function getMemoryCache(): DisplayNameCache {
+  const now = Date.now();
+  if (!memoryCache || (now - memoryCacheTimestamp) > MEMORY_CACHE_TTL) {
+    memoryCache = loadDisplayNamesFromStorageInternal();
+    memoryCacheTimestamp = now;
+  }
+  return memoryCache;
+}
+
+// Invalidate memory cache (call after writes)
+function invalidateMemoryCache(): void {
+  memoryCache = null;
+  memoryCacheTimestamp = 0;
+}
+
+// Load display names from localStorage (public API - now uses memory cache)
+export const loadDisplayNamesFromStorage = (): DisplayNameCache => {
+  return getMemoryCache();
+};
+
 // Save display names to localStorage
 export const saveDisplayNamesToStorage = (cache: DisplayNameCache): void => {
   try {
@@ -60,6 +86,9 @@ export const saveDisplayNamesToStorage = (cache: DisplayNameCache): void => {
     }
     
     localStorage.setItem(DISPLAY_NAMES_STORAGE_KEY, JSON.stringify(cache));
+    // Update memory cache after write
+    memoryCache = cache;
+    memoryCacheTimestamp = Date.now();
   } catch (error) {
     console.error('Error saving display names to storage:', error);
   }
@@ -67,7 +96,7 @@ export const saveDisplayNamesToStorage = (cache: DisplayNameCache): void => {
 
 // Add or update a display name in the cache
 export const addDisplayNameToCache = (pubkey: string, metadata: Metadata, eventCreatedAt?: number): void => {
-  const cache = loadDisplayNamesFromStorage();
+  const cache = getMemoryCache();
   const displayName = metadata.display_name || metadata.name || '';
   
   if (displayName) {
@@ -103,7 +132,7 @@ export const addDisplayNameToCache = (pubkey: string, metadata: Metadata, eventC
 
 // Get display name for a pubkey
 export const getDisplayName = (pubkey: string): string | null => {
-  const cache = loadDisplayNamesFromStorage();
+  const cache = getMemoryCache();
   const entry = cache[pubkey];
   return entry ? entry.displayName : null;
 };
@@ -120,7 +149,7 @@ export const getDisplayNameWithFallback = (pubkey: string, formatPubkey: (pubkey
 
 // Batch add multiple display names
 export const addDisplayNamesBatch = (metadataMap: Record<string, Metadata>): void => {
-  const cache = loadDisplayNamesFromStorage();
+  const cache = getMemoryCache();
   let hasChanges = false;
   
   Object.entries(metadataMap).forEach(([pubkey, metadata]) => {
@@ -152,12 +181,12 @@ export const addDisplayNamesBatch = (metadataMap: Record<string, Metadata>): voi
 
 // Get all cached display names
 export const getAllDisplayNames = (): DisplayNameCache => {
-  return loadDisplayNamesFromStorage();
+  return getMemoryCache();
 };
 
 // Clear expired display names
 export const clearExpiredDisplayNames = (): void => {
-  const cache = loadDisplayNamesFromStorage();
+  const cache = getMemoryCache();
   const now = Date.now();
   const validCache: DisplayNameCache = {};
   
@@ -172,7 +201,7 @@ export const clearExpiredDisplayNames = (): void => {
 
 // Get pubkeys that need display names (not in cache or expired)
 export const getPubkeysNeedingDisplayNames = (pubkeys: string[]): string[] => {
-  const cache = loadDisplayNamesFromStorage();
+  const cache = getMemoryCache();
   const now = Date.now();
   
   return pubkeys.filter(pubkey => {
@@ -190,6 +219,7 @@ export const clearDisplayNamesCache = (): void => {
     }
     
     localStorage.removeItem(DISPLAY_NAMES_STORAGE_KEY);
+    invalidateMemoryCache();
     console.log('Display names cache cleared successfully');
   } catch (error) {
     console.error('Error clearing display names cache:', error);

@@ -50,6 +50,7 @@ const AsciiRendererV2: FC<AsciiRendererV2Props> = ({
     height: number;
   } | null>(null);
   const [imageAspect, setImageAspect] = useState<number | null>(null);
+  const [displayAspect, setDisplayAspect] = useState<number | null>(null);
   const [charWidthPerEm, setCharWidthPerEm] = useState<number>(0.6);
   const [ramp, setRamp] = useState<string>(
     ' .`^",:;Il!i><~+_-?][}{1)(|\\/tfjrxnuvczXYUJCLQ0OZmwqpdbkhao*#MW&8%B@$'
@@ -151,15 +152,32 @@ const AsciiRendererV2: FC<AsciiRendererV2Props> = ({
   }, []);
 
   // Compute output size that preserves image aspect and matches container width
+  // with a max height constraint to prevent oversized images on desktop
   const computeOutputSize = useCallback(
     (containerW: number, aspect: number) => {
       if (!containerW || !aspect)
-        return { w: Math.floor(width), h: Math.floor(height) };
-      const w = Math.floor(containerW);
-      const h = Math.floor(w / aspect);
-      return { w, h };
+        return { w: Math.floor(width), h: Math.floor(height), displayAspect: aspect };
+      
+      // Set max height to prevent scrolling in note content area
+      // Use a reasonable max height for desktop (600px) to match typical note content
+      const maxHeight = isMobile ? Infinity : 600;
+      
+      let w = Math.floor(containerW);
+      let h = Math.floor(w / aspect);
+      
+      // If height exceeds max, constrain height only
+      // Keep w = containerW since the container doesn't shrink
+      if (h > maxHeight) {
+        h = maxHeight;
+      }
+      
+      // Calculate display aspect ratio (width/height) for container sizing
+      // displayAspect now correctly reflects containerW / constrainedHeight
+      const displayAspect = w / h;
+      
+      return { w, h, displayAspect };
     },
-    [width, height]
+    [width, height, isMobile]
   );
 
   // Render via worker (WebGL) and receive an ImageBitmap
@@ -168,6 +186,34 @@ const AsciiRendererV2: FC<AsciiRendererV2Props> = ({
       console.debug("[AsciiRendererV2]", ...args);
     } catch {}
   };
+
+  // Helper function to load image with timeout
+  const loadImageWithTimeout = useCallback(
+    (url: string, timeout: number = 12000): Promise<HTMLImageElement> => {
+      return new Promise((resolve, reject) => {
+        const img = new Image();
+        img.crossOrigin = "anonymous";
+
+        const timeoutId = setTimeout(() => {
+          img.src = ""; // Cancel the request
+          reject(new Error("Image load timeout"));
+        }, timeout);
+
+        img.onload = () => {
+          clearTimeout(timeoutId);
+          resolve(img);
+        };
+
+        img.onerror = () => {
+          clearTimeout(timeoutId);
+          reject(new Error("Image load failed"));
+        };
+
+        img.src = url;
+      });
+    },
+    []
+  );
 
   const renderWithWorker = useCallback(
     async (
@@ -204,8 +250,8 @@ const AsciiRendererV2: FC<AsciiRendererV2Props> = ({
               workerRef.current.postMessage({ type: "cleanup" });
             }
           },
-          2 * 60 * 1000
-        ); // Clean up every 2 minutes to prevent WebGL context accumulation
+          1 * 60 * 1000
+        ); // Clean up every 1 minute (reduced from 2 minutes) to prevent WebGL context accumulation
 
         // Track active workers
         (globalThis as any).__asciiWorkers =
@@ -262,8 +308,15 @@ const AsciiRendererV2: FC<AsciiRendererV2Props> = ({
         });
       }
       const perEm = charWidthPerEm || 0.6;
-      const caps = { cols: isMobile ? 160 : 240, rows: isMobile ? 180 : 200 };
-      const { w, h } = computeOutputSize(containerW, aspect);
+      // Reduced density caps for better performance with shape-based edge detection
+      // Desktop: 140x120 (was 240x200) = ~65% reduction in cells
+      // Mobile: 100x110 (was 160x180) = ~65% reduction in cells
+      const caps = { cols: isMobile ? 100 : 140, rows: isMobile ? 110 : 120 };
+      const { w, h, displayAspect: calcDisplayAspect } = computeOutputSize(containerW, aspect);
+      
+      // Update display aspect ratio for container sizing
+      setDisplayAspect(calcDisplayAspect);
+      
       const transfer: Transferable[] = [bitmap as unknown as Transferable];
       let requestId = Math.floor(Math.random() * 1e9);
       return await new Promise<ImageBitmap>((resolve, reject) => {
@@ -364,9 +417,8 @@ const AsciiRendererV2: FC<AsciiRendererV2Props> = ({
         // If mediaLoader fails, still try the original URL - let the img element decide
 
         lastUrlRef.current = imageUrl;
-        const img = new Image();
-        img.crossOrigin = "anonymous";
-        img.onload = async () => {
+        try {
+          const img = await loadImageWithTimeout(imageUrl, 12000);
           if (cancelled) return;
           const aspect = img.naturalWidth / img.naturalHeight;
           setImageAspect(aspect);
@@ -398,23 +450,21 @@ const AsciiRendererV2: FC<AsciiRendererV2Props> = ({
             onErrorRef.current?.();
             signalReadyOnce();
           }
-        };
-        img.onerror = () => {
+        } catch (loadError) {
           // Don't log CORS errors to console to reduce noise
           if (cancelled) return;
+          log("Image load failed or timed out:", loadError);
           setError(true);
           setShowOriginal(true);
           setIsLoading(false);
           onErrorRef.current?.();
           signalReadyOnce();
-        };
-        img.src = imageUrl;
+        }
       } catch {
         // If everything fails, try original URL as fallback
         if (cancelled) return;
-        const img = new Image();
-        img.crossOrigin = "anonymous";
-        img.onload = async () => {
+        try {
+          const img = await loadImageWithTimeout(src, 12000);
           if (cancelled) return;
           const aspect = img.naturalWidth / img.naturalHeight;
           setImageAspect(aspect);
@@ -445,23 +495,22 @@ const AsciiRendererV2: FC<AsciiRendererV2Props> = ({
             onErrorRef.current?.();
             signalReadyOnce();
           }
-        };
-        img.onerror = () => {
+        } catch (loadError) {
           if (cancelled) return;
+          log("Fallback image load failed or timed out:", loadError);
           setError(true);
           setShowOriginal(true);
           setIsLoading(false);
           onErrorRef.current?.();
           signalReadyOnce();
-        };
-        img.src = src;
+        }
       }
     };
     run();
     return () => {
       cancelled = true;
     };
-  }, [src, renderWithWorker, presentBitmap, width, signalReadyOnce]);
+  }, [src, renderWithWorker, presentBitmap, width, signalReadyOnce, loadImageWithTimeout]);
 
   // Observe container size
   useEffect(() => {
@@ -651,6 +700,7 @@ const AsciiRendererV2: FC<AsciiRendererV2Props> = ({
         ref={containerRef}
         style={{
           width: isMobile ? "100vw" : "100%",
+          maxWidth: isMobile ? "100%" : "600px", // Prevent ASCII from taking whole screen on desktop
           height: "auto",
           position: "relative",
           overflowX: "hidden",
@@ -714,8 +764,8 @@ const AsciiRendererV2: FC<AsciiRendererV2Props> = ({
               style={{
                 position: "relative",
                 width: "100%",
-                paddingTop: imageAspect ? `${100 / imageAspect}%` : undefined,
-                minHeight: !imageAspect ? height : undefined,
+                paddingTop: displayAspect ? `${100 / displayAspect}%` : imageAspect ? `${100 / imageAspect}%` : undefined,
+                minHeight: !displayAspect && !imageAspect ? height : undefined,
                 willChange: "transform",
               }}
             >

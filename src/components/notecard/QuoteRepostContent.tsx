@@ -211,8 +211,6 @@ export const QuoteRepostContent: React.FC<QuoteRepostContentProps> = ({
                 onAsciiRendered={onAsciiRendered}
                 onMediaLoadError={onMediaLoadError}
                 onImageDimensionsLoaded={onImageDimensionsLoaded}
-                showLinkPreviews={true}
-                maxLinkPreviewsToShow={2}
               />
             )}
           </div>
@@ -295,6 +293,9 @@ export const QuoteRepostContent: React.FC<QuoteRepostContentProps> = ({
                 fontWeight: "bold",
                 fontSize: "var(--font-size-sm)",
                 cursor: "pointer",
+                maxWidth: isMobile ? "100%" : "250px",
+                wordBreak: "break-all",
+                overflowWrap: "anywhere",
               }}
             >
               {getDisplayNameForPubkey(repostOriginal.pubkey)}
@@ -363,8 +364,6 @@ export const QuoteRepostContent: React.FC<QuoteRepostContentProps> = ({
               onAsciiRendered={onAsciiRendered}
               onMediaLoadError={onMediaLoadError}
               onImageDimensionsLoaded={onImageDimensionsLoaded}
-              showLinkPreviews={true}
-              maxLinkPreviewsToShow={2}
             />
             {/* View More button for truncated content - links to original */}
             {(repostOriginal.content || "").length > (isMobile ? 140 : 320) && (

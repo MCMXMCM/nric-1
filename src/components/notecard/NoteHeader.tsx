@@ -527,10 +527,9 @@ export const NoteHeader: React.FC<NoteHeaderProps> = ({
             style={{
               color: "var(--accent-color)",
               textDecoration: "none",
-              maxWidth: "55dvw",
-              textOverflow: "ellipsis",
-              whiteSpace: "nowrap",
-              overflow: "hidden",
+              maxWidth: isMobile ? "100%" : "55dvw",
+              wordBreak: "break-all",
+              overflowWrap: "anywhere",
               fontWeight: "500",
             }}
           >

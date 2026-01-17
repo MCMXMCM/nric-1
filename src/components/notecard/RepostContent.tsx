@@ -153,10 +153,9 @@ export const RepostContent: React.FC<RepostContentProps> = ({
               fontWeight: "bold",
               fontSize: "var(--font-size-sm)",
               cursor: "pointer",
-              maxWidth: isMobile ? "25vw" : "250px",
-              overflow: "hidden",
-              textOverflow: "ellipsis",
-              whiteSpace: "nowrap",
+              maxWidth: isMobile ? "100%" : "250px",
+              wordBreak: "break-all",
+              overflowWrap: "anywhere",
             }}
           >
             {getDisplayNameForPubkey(repostOriginal.pubkey)}
@@ -204,8 +203,6 @@ export const RepostContent: React.FC<RepostContentProps> = ({
               onAsciiRendered={onAsciiRendered}
               onMediaLoadError={onMediaLoadError}
               onImageDimensionsLoaded={onImageDimensionsLoaded}
-              showLinkPreviews={true}
-              maxLinkPreviewsToShow={2}
             />
           )}
 

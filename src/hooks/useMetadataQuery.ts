@@ -58,12 +58,23 @@ export function useMetadataQuery({
         relayUrls,
       });
 
+      // Sync to display names cache when metadata is fetched
+      if (result.metadata && pubkeyHex) {
+        try {
+          const { addDisplayNameToCache } = await import('../utils/nostr/userDisplayNames');
+          addDisplayNameToCache(pubkeyHex, result.metadata);
+        } catch (error) {
+          // Silently fail - display name cache update is not critical
+          console.warn('Failed to update display name cache:', error);
+        }
+      }
+
       return result;
     },
-    // SWR behavior: treat data as stale to enable background refresh
-    staleTime: 0,
+    // Metadata doesn't change frequently, so use 2 minute stale time
+    staleTime: 2 * 60 * 1000, // 2 minutes - metadata doesn't change frequently
     gcTime: 10 * 60 * 1000, // 10 minutes
-    refetchOnMount: true,
+    refetchOnMount: false, // Avoid unnecessary refetches when data is fresh
     // Show cached data immediately while fetching
     placeholderData: (): { metadata: Metadata | null; error?: string } | undefined => {
       const cachedData = queryClient.getQueryData(queryKey) as

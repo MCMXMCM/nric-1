@@ -38,7 +38,7 @@ interface ImageDimensions {
 
 const MAX_DISPLAY_IMAGES = 5; // Show up to 5 images in the grid
 const GALLERY_MAX_HEIGHT = 300; // Fixed max height for feed estimation
-const DESKTOP_MAX_HEIGHT = 300; // Max height for desktop display (single and multiple images)
+const DESKTOP_MAX_HEIGHT = 600; // Max height for desktop display - matches ASCII renderer maxHeight
 
 export const EnhancedImageGallery: React.FC<EnhancedImageGalleryProps> = ({
   noteId,
@@ -314,76 +314,10 @@ export const EnhancedImageGallery: React.FC<EnhancedImageGalleryProps> = ({
       ...containerStyle,
     };
 
-    if (hasImageError) {
-      if (isPermanentlyFailed) {
-        return (
-          <div
-            style={{
-              ...imageStyle,
-              height: "100%",
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              backgroundColor: "var(--app-bg-color)",
-              color: "var(--text-color)",
-              fontSize: "0.75rem",
-              textAlign: "center",
-              opacity: 0.7,
-              border: "1px solid var(--border-color)",
-              padding: "4px",
-              boxSizing: "border-box",
-            }}
-          >
-            <div>
-              Unable to load image
-              <br />
-              <span style={{ fontSize: "0.7rem", opacity: 0.5 }}>
-                {url.length > 30 ? `${url.substring(0, 30)}...` : url}
-              </span>
-            </div>
-          </div>
-        );
-      } else {
-        return (
-          <div
-            style={{
-              ...imageStyle,
-              height: "100%",
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              backgroundColor: "var(--app-bg-color)",
-              color: "var(--accent-color)",
-              fontSize: "0.75rem",
-              textAlign: "center",
-              border: "1px dotted var(--border-color)",
-              textDecoration: "underline",
-              padding: "4px",
-              boxSizing: "border-box",
-            }}
-            onClick={() => {
-              imagesErrorRef.current.delete(url);
-              imagesLoadingRef.current.add(url);
-              triggerUpdate();
-            }}
-            role="button"
-            tabIndex={0}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" || e.key === " ") {
-                e.preventDefault();
-                imagesErrorRef.current.delete(url);
-                imagesLoadingRef.current.add(url);
-                triggerUpdate();
-              }
-            }}
-          >
-            <div>
-              Failed to load - Click to retry
-              <br />({maxRetries - retryCount} attempts left)
-            </div>
-          </div>
-        );
-      }
+    // Only hide permanently failed images - let temporary errors continue to CORSImage
+    // which has its own retry logic (proxy fallbacks, etc.)
+    if (isPermanentlyFailed) {
+      return null;
     }
 
     const shouldShowAscii = useAscii && !imageAsciiOverrides[url];
@@ -453,6 +387,7 @@ export const EnhancedImageGallery: React.FC<EnhancedImageGalleryProps> = ({
   }
 
   const { primary } = organizeImagesForLayout(imageUrls);
+
   const totalImages = imageUrls.length;
   const showViewMoreButton = totalImages > MAX_DISPLAY_IMAGES;
   const remainingCount = Math.max(0, totalImages - MAX_DISPLAY_IMAGES);

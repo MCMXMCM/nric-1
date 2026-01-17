@@ -58,13 +58,6 @@ export const NoteTextContent: React.FC<NoteTextContentProps> = ({
   const isTextOnly = imageUrls.length === 0 || hasMediaError;
   const shouldCenter = false; // Always left-align notes on desktop
 
-  // Removed link preview fetching since we're not showing previews in long form feed content
-  // const { linkPreviews, isLoading: isLoadingPreviews } = useLinkPreviews(
-  //   textContent,
-  //   true
-  // );
-
-  // const linkUrls = extractNonMediaUrls(textContent);
 
   // Extract preview content from article (used when article has no summary)
   // Always respects the maxCharacters limit for feed display
@@ -254,8 +247,6 @@ export const NoteTextContent: React.FC<NoteTextContentProps> = ({
             imageMode={imageMode}
             getDisplayNameForPubkey={getDisplayNameForPubkey}
             onHashtagClick={onHashtagClick}
-            showLinkPreviews={true}
-            maxLinkPreviewsToShow={3}
           />
         )}
 

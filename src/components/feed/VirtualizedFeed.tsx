@@ -25,6 +25,9 @@ import type { Note, Metadata } from "../../types/nostr/types";
 import { useRouterAwareScrollRestoration } from "../../hooks/useRouterAwareScrollRestoration";
 import { usePersistentImageCache } from "../../hooks/usePersistentImageCache";
 
+// Shared ResizeObserver context for feed items
+const SharedResizeObserverContext = React.createContext<ResizeObserver | null>(null);
+
 // ResizeObserver-enabled virtual item component
 interface VirtualizedNoteItemProps {
   virtualItem: VirtualItem;
@@ -50,11 +53,13 @@ const VirtualizedNoteItem: React.FC<VirtualizedNoteItemProps> = ({
 }) => {
   const itemRef = useRef<HTMLDivElement>(null);
   const lastMeasuredHeight = useRef<number>(0);
+  const sharedObserver = React.useContext(SharedResizeObserverContext);
 
   useEffect(() => {
     if (!itemRef.current) return;
-
-    const resizeObserver = new ResizeObserver((entries) => {
+    
+    // Use shared observer if available, otherwise create a fallback
+    const resizeObserver = sharedObserver || new ResizeObserver((entries) => {
       // ✅ Enhanced resize handling with image loading awareness
       const stabilizer = getGlobalScrollStabilizer();
       if (stabilizer.isStabilizing()) {
@@ -120,8 +125,8 @@ const VirtualizedNoteItem: React.FC<VirtualizedNoteItemProps> = ({
                 });
               }
             },
-            hasLoadingImages ? 100 : 50
-          ); // Longer delay for image loading events
+            hasLoadingImages ? 200 : 100
+          ); // Increased debounce: 200ms for image loading, 100ms for other changes
         }
       }
     });
@@ -129,14 +134,23 @@ const VirtualizedNoteItem: React.FC<VirtualizedNoteItemProps> = ({
     resizeObserver.observe(itemRef.current);
 
     return () => {
-      resizeObserver.disconnect();
+      // Only disconnect if we created our own observer (not shared)
+      if (!sharedObserver) {
+        resizeObserver.disconnect();
+      } else {
+        // Check if element still exists before unobserve
+        if (itemRef.current) {
+          resizeObserver.unobserve(itemRef.current);
+        }
+      }
     };
-  }, [virtualizer, noteId, recordActualHeight, storageKey]);
+  }, [virtualizer, noteId, recordActualHeight, storageKey, sharedObserver]);
 
   return (
     <div
       ref={itemRef}
       data-index={virtualItem.index}
+      data-note-id={noteId}
       style={{
         position: "absolute",
         top: 0,
@@ -383,6 +397,7 @@ export const VirtualizedFeed: React.FC<VirtualizedFeedProps> = ({
   } = useNoteDynamicHeight({
     isMobile,
     imageMode,
+    useAscii,
     showFullContent: false, // In feed, we don't show full content
     onHeightChange: (noteId: string) => {
       // Find the note index and trigger re-measurement
@@ -523,7 +538,7 @@ export const VirtualizedFeed: React.FC<VirtualizedFeedProps> = ({
     count: notes.length,
     getScrollElement: () => parentRef.current,
     estimateSize,
-    overscan: isMobile ? 1 : 3, // Reduce offscreen rendering on mobile/iOS to save memory
+    overscan: isMobile ? 3 : 5, // Increase offscreen rendering for better prefetching performance
     // Do not set initialOffset; router-aware restoration will position precisely by id+offset
     // Note: TanStack Virtual doesn't support initialMeasurementsCache directly
     // We'll apply cached measurements in the measureElement function
@@ -1022,6 +1037,47 @@ export const VirtualizedFeed: React.FC<VirtualizedFeedProps> = ({
     routerRestoration,
   ]);
 
+  // Create shared ResizeObserver for all feed items to reduce CPU usage
+  const sharedResizeObserver = useMemo(() => {
+    return new ResizeObserver((entries) => {
+      // Handle all resize events in one observer
+      for (const entry of entries) {
+        const target = entry.target as HTMLElement;
+        const noteIdAttr = target.getAttribute('data-note-id');
+        const indexAttr = target.getAttribute('data-index');
+        
+        if (noteIdAttr && recordActualHeight && storageKey) {
+          const newHeight = entry.contentRect.height;
+          if (newHeight > 0) {
+            recordActualHeight(noteIdAttr, newHeight, storageKey);
+          }
+        }
+        
+        // Trigger remeasurement for virtualizer
+        if (indexAttr !== null && parentRef.current) {
+          const stabilizer = getGlobalScrollStabilizer();
+          if (!stabilizer.isStabilizing()) {
+            setTimeout(() => {
+              if (parentRef.current && !stabilizer.isStabilizing()) {
+                const element = parentRef.current.querySelector(`[data-index="${indexAttr}"]`);
+                if (element) {
+                  virtualizer.measureElement(element);
+                }
+              }
+            }, 200); // Increased debounce from 100ms to 200ms
+          }
+        }
+      }
+    });
+  }, [virtualizer, recordActualHeight, storageKey]);
+
+  // Cleanup shared observer on unmount
+  useEffect(() => {
+    return () => {
+      sharedResizeObserver.disconnect();
+    };
+  }, [sharedResizeObserver]);
+
   return (
     <div
       ref={parentRef}
@@ -1074,12 +1130,13 @@ export const VirtualizedFeed: React.FC<VirtualizedFeedProps> = ({
             overflowX: "hidden", // Keep horizontal scroll hidden for virtual list
           }}
         >
-          {virtualItems.map((virtualItem) => {
-            const note = notes[virtualItem.index];
-            if (!note) return null;
+          <SharedResizeObserverContext.Provider value={sharedResizeObserver}>
+            {virtualItems.map((virtualItem) => {
+              const note = notes[virtualItem.index];
+              if (!note) return null;
 
-            return (
-              <VirtualizedNoteItem
+              return (
+                <VirtualizedNoteItem
                 key={note.id}
                 virtualItem={virtualItem}
                 isMobile={isMobile}
@@ -1118,8 +1175,9 @@ export const VirtualizedFeed: React.FC<VirtualizedFeedProps> = ({
                   />
                 </NoteCardErrorBoundary>
               </VirtualizedNoteItem>
-            );
-          })}
+              );
+            })}
+          </SharedResizeObserverContext.Provider>
         </div>
 
         {/* Loading indicator and end-of-feed message at the bottom */}

@@ -1,6 +1,7 @@
 import React from 'react';
 import { nip19 } from 'nostr-tools';
 import { useMetadataQuery } from './useMetadataQuery';
+import { getDisplayName } from '../utils/nostr/userDisplayNames';
 
 interface UseCreatedByDisplayNameOptions {
   pubkey: string;
@@ -33,12 +34,16 @@ export const useCreatedByDisplayName = ({
   isMobile = false,
   getDisplayNameForPubkey,
 }: UseCreatedByDisplayNameOptions): UseCreatedByDisplayNameResult => {
-  // Check if we have a display name already
-  const currentDisplayName = getDisplayNameForPubkey(pubkey);
   const npub = nip19.npubEncode(pubkey);
+  
+  // Check memory cache first for faster lookup
+  const cachedDisplayName = React.useMemo(() => getDisplayName(pubkey), [pubkey]);
+  
+  // Check if we have a display name already (from cache or getDisplayNameForPubkey)
+  const currentDisplayName = cachedDisplayName || getDisplayNameForPubkey(pubkey);
 
   // If we already have a display name that's different from npub, use it
-  const hasDisplayName = currentDisplayName !== npub;
+  const hasDisplayName = cachedDisplayName !== null || currentDisplayName !== npub;
 
   // Only fetch metadata if we don't have a display name
   const { data: metadataResult, isPending: isLoadingMetadata } =
@@ -55,7 +60,10 @@ export const useCreatedByDisplayName = ({
     }
 
     if (isLoadingMetadata) {
-      return null; // Will show loading placeholder
+      // Show abbreviated npub instead of null (loading spinner)
+      return isMobile && npub.length > 16
+        ? `${npub.slice(0, 8)}...${npub.slice(-6)}`
+        : npub.slice(0, 12) + "...";
     }
 
     if (metadataResult?.metadata) {

@@ -112,16 +112,11 @@ export const MediaGallery: React.FC<MediaGalleryProps> = ({
         }
         triggerUpdate(); // Use debounced update
       }
-      // Only mark the entire note as having media errors if all images have failed
-      const allImagesFailed = imageUrls.every(
-        (url) =>
-          imagesErrorRef.current.has(url) || !imagesLoadingRef.current.has(url)
-      );
-      if (allImagesFailed) {
-        onMediaLoadError(noteId);
-      }
+      // REMOVED: Don't mark entire note as failed when individual images fail
+      // Individual images will show error states, but the note remains visible
+      // Only call onMediaLoadError if we want to track errors for analytics, but don't hide the note
     },
-    [noteId, onMediaLoadError, imageUrls, triggerUpdate]
+    [triggerUpdate]
   );
 
   // Initialize loading state for images when they change, using persistent cache

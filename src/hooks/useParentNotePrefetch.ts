@@ -119,6 +119,22 @@ export function useParentNotePrefetch({
         // Cache the note
         queryClient.setQueryData(CACHE_KEYS.NOTE(noteId), note);
         
+        // Also prefetch parent note author metadata
+        if (note.pubkey) {
+          const metadataQueryKey = ['metadata', note.pubkey];
+          queryClient.prefetchQuery({
+            queryKey: metadataQueryKey,
+            queryFn: async () => {
+              const { fetchUserMetadata } = await import('../utils/profileMetadataUtils');
+              return await fetchUserMetadata({ pubkeyHex: note.pubkey, relayUrls });
+            },
+            staleTime: 0,
+            gcTime: 10 * 60 * 1000,
+          }).catch(() => {
+            // Ignore metadata prefetch errors
+          });
+        }
+        
         console.log(`📋 Prefetched parent/root note: ${noteId.slice(0, 8)}`);
       }
     } catch (error) {

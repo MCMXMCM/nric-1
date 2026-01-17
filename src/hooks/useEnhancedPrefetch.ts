@@ -12,7 +12,7 @@ interface UseEnhancedPrefetchOptions {
   currentIndex: number;
   relayUrls: string[];
   enabled?: boolean;
-  prefetchWindow?: number; // How many notes ahead to prefetch (default: 3)
+  prefetchWindow?: number; // How many notes ahead to prefetch (default: 10)
   nostrClient?: any;
   myPubkey?: string; // For reaction prefetching (to track user's reactions)
 }
@@ -26,7 +26,7 @@ export function useEnhancedPrefetch({
   currentIndex,
   relayUrls,
   enabled = true,
-  prefetchWindow = 3,
+  prefetchWindow = 10,
   nostrClient,
   myPubkey
 }: UseEnhancedPrefetchOptions) {
@@ -249,8 +249,9 @@ export function useEnhancedPrefetch({
   const getNotesForPrefetch = useCallback(() => {
     if (!notes || notes.length === 0) return [];
     
-    const startIndex = currentIndex + 1;
-    const endIndex = Math.min(startIndex + prefetchWindow, notes.length);
+    // Prefetch both ahead AND behind current position
+    const startIndex = Math.max(0, currentIndex - 3);  // 3 notes behind
+    const endIndex = Math.min(notes.length, currentIndex + prefetchWindow + 1);
     
     return notes.slice(startIndex, endIndex);
   }, [notes, currentIndex, prefetchWindow]);

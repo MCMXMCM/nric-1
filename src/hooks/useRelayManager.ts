@@ -572,10 +572,18 @@ export const useRelayManager = ({ nostrClient, initialRelays = [], pubkeyHex }: 
       return attemptsA - attemptsB; // Fewer attempts = more likely to succeed
     });
 
-    // Connect to relays with a small delay between each to avoid overwhelming the network
-    sortedRelays.forEach((url, index) => {
-      setTimeout(() => connectRelay(url), index * 100); // 100ms delay between connections
-    });
+    // Batch connections in groups of 3 with stagger to avoid overwhelming the network
+    const batchSize = 3;
+    const staggerDelay = 50; // Reduced from 100ms to 50ms for faster initial connection
+    
+    for (let i = 0; i < sortedRelays.length; i += batchSize) {
+      const batch = sortedRelays.slice(i, i + batchSize);
+      const batchDelay = Math.floor(i / batchSize) * (staggerDelay * batchSize);
+      
+      batch.forEach((url, batchIndex) => {
+        setTimeout(() => connectRelay(url), batchDelay + (batchIndex * staggerDelay));
+      });
+    }
   }, [nostrClient, relayUrls, relayPermissions]); // Removed connectRelay from dependencies to prevent infinite loop
 
   // Health monitoring for stuck queries - runs every 30 seconds
