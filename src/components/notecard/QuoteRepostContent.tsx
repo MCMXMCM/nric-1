@@ -252,7 +252,7 @@ export const QuoteRepostContent: React.FC<QuoteRepostContentProps> = ({
       {repostOriginal ? (
         <div
           style={{
-            border: "1px solid var(--border-color)",
+            border: isMobile ? "1px solid var(--border-color)" : "none",
             borderRadius: "0px",
             padding: "0.75rem",
             backgroundColor: "transparent",
