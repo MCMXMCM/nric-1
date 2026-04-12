@@ -1,6 +1,7 @@
 import { useCallback, useRef, useEffect } from 'react';
 import { useRouter } from '@tanstack/react-router';
 import { Virtualizer } from '@tanstack/react-virtual';
+import { startFeedMetric } from '../utils/nostr/feedPerformanceMetrics';
 
 interface ScrollState {
   scrollTop: number;
@@ -50,6 +51,7 @@ export function useRouterAwareScrollRestoration(config: RouterAwareScrollRestora
   // One-shot restoration control
   const pendingRestoreRef = useRef(false);
   const restoredOnceRef = useRef(false);
+  const finishRestoreMetricRef = useRef<((metadata?: Record<string, unknown>) => void) | null>(null);
 
   // Generate storage key based on current route
   const getStorageKey = useCallback(() => {
@@ -150,6 +152,10 @@ export function useRouterAwareScrollRestoration(config: RouterAwareScrollRestora
       
       isRestoringRef.current = true;
       pendingRestoreRef.current = false;
+      finishRestoreMetricRef.current = startFeedMetric('scroll_restore', {
+        focusedIndex: scrollState.focusedIndex,
+        noteCount: notes.length,
+      });
       
       if (onRestoreStart) {
         onRestoreStart();
@@ -253,7 +259,12 @@ export function useRouterAwareScrollRestoration(config: RouterAwareScrollRestora
           
           // Check if fine-tuning is actually needed by comparing current position with target
           const currentScrollTop = scrollElement.scrollTop;
-          const targetScrollTop = scrollState.focusedIndex * 200 + scrollState.focusedOffset; // Rough estimate
+          const focusedItem = virtualizer
+            .getVirtualItems()
+            .find((item) => item.index === scrollState.focusedIndex);
+          const targetScrollTop = focusedItem
+            ? focusedItem.start + scrollState.focusedOffset
+            : scrollState.scrollTop;
           const positionDifference = Math.abs(currentScrollTop - targetScrollTop);
           
           // Only fine-tune if there's a significant difference (more than 50px)
@@ -261,6 +272,7 @@ export function useRouterAwareScrollRestoration(config: RouterAwareScrollRestora
             if (debug) {
               console.log('🎯 Position already accurate, skipping fine-tuning');
             }
+            finishRestoreMetricRef.current?.({ status: 'already_aligned' });
             return;
           }
           
@@ -295,11 +307,18 @@ export function useRouterAwareScrollRestoration(config: RouterAwareScrollRestora
         if (debug) {
           console.log('✅ Scroll restoration complete');
         }
+        finishRestoreMetricRef.current?.({ status: 'ok' });
+        finishRestoreMetricRef.current = null;
       }, RESTORATION_TIMEOUT);
       
     } catch (error) {
       console.warn('Failed to restore scroll state:', error);
       isRestoringRef.current = false;
+      finishRestoreMetricRef.current?.({
+        status: 'error',
+        error: (error as Error)?.message ?? 'unknown',
+      });
+      finishRestoreMetricRef.current = null;
       // Clear restoration lock on error
       try {
         sessionStorage.removeItem('virtualScrollRestorationLock');

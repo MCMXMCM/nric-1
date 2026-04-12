@@ -125,6 +125,15 @@ export class RelayConnectionPool {
       throw new Error('RelayConnectionPool has been destroyed');
     }
 
+    if (typeof Worker !== 'undefined') {
+      try {
+        const { publishViaRelayWorker } = await import('../../lib/relayPublishWorkerClient');
+        return await publishViaRelayWorker(relayUrls, event);
+      } catch {
+        // Fall back to main-thread pool (tests, unsupported environments, worker errors).
+      }
+    }
+
     // Publish to all relays and consider success if at least one accepts.
     const settled = await Promise.allSettled(this.pool.publish(relayUrls, event));
     const successes: string[] = [];
@@ -149,7 +158,17 @@ export class RelayConnectionPool {
       throw new Error('RelayConnectionPool has been destroyed');
     }
 
-    return this.pool.subscribeMany(relayUrls, filters, params);
+    // nostr-tools 2.21+: subscribeMany takes a single Filter; use subscribeMap for multiple
+    if (filters.length === 0) {
+      return { close: () => {} };
+    }
+    if (filters.length === 1) {
+      return this.pool.subscribeMany(relayUrls, filters[0], params);
+    }
+    const requests = relayUrls.flatMap((url) =>
+      filters.map((filter) => ({ url, filter }))
+    );
+    return this.pool.subscribeMap(requests, params);
   }
 
   /**
@@ -312,13 +331,18 @@ export class RelayConnectionPool {
   private startHealthMonitoring(): void {
     // Use longer interval on mobile to reduce CPU usage
     const isMobile = typeof window !== 'undefined' && window.innerWidth <= 768;
-    const interval = isMobile ? 90000 : 60000; // 90s on mobile, 60s on desktop (increased from 30s)
+    const interval = isMobile ? 120000 : 90000; // Longer intervals to reduce idle wakeups
     
     this.healthCheckInterval = setInterval(() => {
       if (this.isDestroyed) return;
 
       // Skip health checks when app is backgrounded (Page Visibility API)
       if (typeof document !== 'undefined' && document.hidden) {
+        return;
+      }
+
+      // Nothing to check — avoid pointless work while the pool is idle
+      if (this.activeConnections.size === 0) {
         return;
       }
 
@@ -334,6 +358,7 @@ export class RelayConnectionPool {
     if (this.isDestroyed) return;
 
     const urlsToCheck = Array.from(this.activeConnections.keys());
+    if (urlsToCheck.length === 0) return;
 
     for (const url of urlsToCheck) {
       try {
@@ -436,6 +461,14 @@ export class RelayConnectionPool {
    */
   destroy(): void {
     if (this.isDestroyed) return;
+
+    try {
+      void import('../../lib/relayPublishWorkerClient').then((m) => {
+        m.terminateRelayPublishWorker?.();
+      });
+    } catch {
+      // ignore
+    }
 
     this.isDestroyed = true;
 

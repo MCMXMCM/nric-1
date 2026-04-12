@@ -18,7 +18,8 @@ export interface ReplyCountResult {
 export function useReplyCountQuery(
   noteId: string | null | undefined,
   relayUrls: string[],
-  pool: SimplePool | null
+  pool: SimplePool | null,
+  queriesEnabled: boolean = true
 ): ReplyCountResult {
 
   const fetchReplyCount = useCallback(async (): Promise<number> => {
@@ -26,14 +27,15 @@ export function useReplyCountQuery(
       return 0;
     }
 
+    const scopedRelayUrls = Array.from(new Set(relayUrls)).slice(0, 8);
     // Query for notes that have this note as a parent (reply or root)
     const filter: Filter = { 
       kinds: [1], 
       '#e': [noteId], 
-      limit: 1000 
+      limit: 300 
     } as any;
     
-    const events: Event[] = await pool.querySync(relayUrls, filter);
+    const events: Event[] = await pool.querySync(scopedRelayUrls, filter);
     
     // Filter to only count actual replies (not reposts or other interactions)
     let replyCount = 0;
@@ -66,7 +68,7 @@ export function useReplyCountQuery(
   } = useQuery({
     queryKey: CACHE_KEYS.REPLY_COUNT(noteId || ''),
     queryFn: fetchReplyCount,
-    enabled: Boolean(noteId && pool && relayUrls.length > 0),
+    enabled: Boolean(noteId && pool && relayUrls.length > 0 && queriesEnabled),
     staleTime: 60000, // 1 minute
     gcTime: 5 * 60 * 1000, // 5 minutes
   });

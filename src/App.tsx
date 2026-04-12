@@ -23,13 +23,39 @@ import {
 } from "./utils/nostr/threadEventManager";
 import { createAppRouter } from "./router";
 
+const NON_PERSISTED_QUERY_PREFIXES = new Set([
+  "reaction-counts",
+  "reply-count",
+  "thread",
+  "note",
+]);
+
+function shouldDehydrateAppQuery(query: { queryKey: readonly unknown[]; state?: any }): boolean {
+  const queryKey = query.queryKey || [];
+  const rootKey = String(queryKey[0] ?? "");
+
+  if (NON_PERSISTED_QUERY_PREFIXES.has(rootKey)) {
+    return false;
+  }
+
+  // Keep persisted feed payloads bounded to avoid large IndexedDB snapshots.
+  if (rootKey === "nostrify-feed") {
+    const pages = query?.state?.data?.pages;
+    if (Array.isArray(pages) && pages.length > 18) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
 function App() {
   const [showSplash, setShowSplash] = useState(true);
 
   // Create a QueryClient instance
   const queryClient = useMemo(
-    () =>
-      new QueryClient({
+    () => {
+      const client = new QueryClient({
         defaultOptions: {
           queries: {
             staleTime: 5 * 60 * 1000, // 5 minutes
@@ -38,7 +64,16 @@ function App() {
             refetchOnWindowFocus: false,
           },
         },
-      }),
+      });
+
+      // High-cardinality per-note/thread caches are intentionally short-lived.
+      client.setQueryDefaults(["note"], { gcTime: 4 * 60 * 1000, staleTime: 2 * 60 * 1000 });
+      client.setQueryDefaults(["thread"], { gcTime: 3 * 60 * 1000, staleTime: 60 * 1000 });
+      client.setQueryDefaults(["reaction-counts"], { gcTime: 3 * 60 * 1000, staleTime: 20 * 1000 });
+      client.setQueryDefaults(["reply-count"], { gcTime: 3 * 60 * 1000, staleTime: 30 * 1000 });
+
+      return client;
+    },
     []
   );
 
@@ -208,7 +243,13 @@ function App() {
   return (
     <PersistQueryClientProvider
       client={queryClient}
-      persistOptions={{ persister }}
+      persistOptions={{
+        persister,
+        maxAge: 1000 * 60 * 60 * 6, // 6 hours
+        dehydrateOptions: {
+          shouldDehydrateQuery: shouldDehydrateAppQuery,
+        },
+      }}
     >
       <div
         style={{

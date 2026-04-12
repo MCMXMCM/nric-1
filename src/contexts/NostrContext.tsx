@@ -245,7 +245,8 @@ export const NostrProvider: React.FC<{ children: React.ReactNode }> = ({
   }, []);
 
   useEffect(() => {
-    const id = window.setInterval(() => setNip07Available(hasNip07()), 5000);
+    // Low-frequency poll: extension injection is rare; 5s was unnecessary wakeups/heat.
+    const id = window.setInterval(() => setNip07Available(hasNip07()), 60000);
     return () => window.clearInterval(id);
   }, []);
 

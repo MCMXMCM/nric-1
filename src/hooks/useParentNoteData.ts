@@ -8,6 +8,8 @@ export interface UseParentNoteDataOptions {
   parentNoteId?: string;
   parentNote?: any;
   relayUrls: string[];
+  /** When false, skips fetching parent note / metadata (feed performance). */
+  enabled?: boolean;
 }
 
 export interface UseParentNoteDataResult {
@@ -24,6 +26,7 @@ export const useParentNoteData = ({
   parentNoteId,
   parentNote,
   relayUrls,
+  enabled = true,
 }: UseParentNoteDataOptions): UseParentNoteDataResult => {
   // Create a ref for the relay pool
   const poolRef = useRef(getGlobalRelayPool());
@@ -32,7 +35,7 @@ export const useParentNoteData = ({
   const { note: fetchedParentNote, isLoading: isLoadingParentNote } = useNote({
     noteId: parentNoteId || "",
     relayUrls,
-    enabled: !!parentNoteId && !parentNote,
+    enabled: enabled && !!parentNoteId && !parentNote,
     poolRef,
     buildAugmentedRelays: (relays) => relays,
   });
@@ -67,7 +70,7 @@ export const useParentNoteData = ({
   } = useUnifiedMetadata({
     pubkeyHex: parentPubkey || "",
     relayUrls: parentPubkey ? relayUrls : [],
-    enabled: !!parentPubkey,
+    enabled: enabled && !!parentPubkey,
     updateDisplayNames: true,
     updateGlobalState: true,
   });

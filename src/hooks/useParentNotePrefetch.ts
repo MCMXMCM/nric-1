@@ -11,6 +11,8 @@ interface UseParentNotePrefetchOptions {
   enabled?: boolean;
   prefetchWindow?: number;
   currentIndex?: number;
+  /** When true, skip the background batch effect (feed pagination / critical path). */
+  pauseBackgroundBatch?: boolean;
 }
 
 interface UseParentNotePrefetchResult {
@@ -27,7 +29,8 @@ export function useParentNotePrefetch({
   relayUrls,
   enabled = true,
   prefetchWindow = 5,
-  currentIndex = 0
+  currentIndex = 0,
+  pauseBackgroundBatch = false,
 }: UseParentNotePrefetchOptions): UseParentNotePrefetchResult {
   const queryClient = useQueryClient();
   const activePrefetchesRef = useRef<Set<string>>(new Set());
@@ -182,7 +185,7 @@ export function useParentNotePrefetch({
 
   // Main prefetch effect
   useEffect(() => {
-    if (!enabled || !notes || notes.length === 0) return;
+    if (!enabled || pauseBackgroundBatch || !notes || notes.length === 0) return;
 
     const notesToPrefetch = getNotesForParentPrefetch();
     if (notesToPrefetch.length === 0) return;
@@ -193,7 +196,7 @@ export function useParentNotePrefetch({
     Promise.all(prefetchPromises).catch(error => {
       console.error('Error in parent note prefetch batch:', error);
     });
-  }, [enabled, notes, currentIndex, prefetchWindow, getNotesForParentPrefetch, prefetchParentNotes]);
+  }, [enabled, pauseBackgroundBatch, notes, currentIndex, prefetchWindow, getNotesForParentPrefetch, prefetchParentNotes]);
 
   // Cleanup function
   useEffect(() => {

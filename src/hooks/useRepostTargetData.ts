@@ -8,6 +8,7 @@ export interface UseRepostTargetDataOptions {
   repostTargetId?: string;
   repostTargetNote?: any;
   relayUrls: string[];
+  enabled?: boolean;
 }
 
 export interface UseRepostTargetDataResult {
@@ -23,6 +24,7 @@ export const useRepostTargetData = ({
   repostTargetId,
   repostTargetNote,
   relayUrls,
+  enabled = true,
 }: UseRepostTargetDataOptions): UseRepostTargetDataResult => {
   // Create a ref for the relay pool
   const poolRef = useRef(getGlobalRelayPool());
@@ -31,7 +33,7 @@ export const useRepostTargetData = ({
   const { note: fetchedRepostTargetNote, isLoading: isLoadingRepostTargetNote } = useNote({
     noteId: repostTargetId || "",
     relayUrls,
-    enabled: !!repostTargetId && !repostTargetNote,
+    enabled: enabled && !!repostTargetId && !repostTargetNote,
     poolRef,
     buildAugmentedRelays: (relays) => relays,
   });
@@ -66,7 +68,7 @@ export const useRepostTargetData = ({
   } = useUnifiedMetadata({
     pubkeyHex: repostTargetPubkey || "",
     relayUrls: repostTargetPubkey ? relayUrls : [],
-    enabled: !!repostTargetPubkey,
+    enabled: enabled && !!repostTargetPubkey,
     updateDisplayNames: true,
     updateGlobalState: true,
   });

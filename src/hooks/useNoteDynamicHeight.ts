@@ -1,6 +1,7 @@
-import { useCallback, useRef } from "react";
+import { useCallback, useEffect, useRef } from "react";
 import type { Note } from "../types/nostr/types";
 import { extractImageUrls, extractVideoUrls, removeMediaUrls } from "../utils/nostr/utils";
+import { recordFeedMetric } from "../utils/nostr/feedPerformanceMetrics";
 
 interface NoteDynamicHeightOptions {
   isMobile: boolean;
@@ -33,6 +34,106 @@ export const useNoteDynamicHeight = (options: NoteDynamicHeightOptions) => {
   // Store actual image dimensions for dynamic sizing
   const imageDimensionsCache = useRef<Map<string, ImageDimensions>>(new Map());
   const noteDimensionsCache = useRef<Map<string, NoteDimensions>>(new Map());
+  const imageDimensionsTouchedAt = useRef<Map<string, number>>(new Map());
+  const noteDimensionsTouchedAt = useRef<Map<string, number>>(new Map());
+
+  const MAX_IMAGE_DIMENSIONS_CACHE = 900;
+  const MAX_NOTE_DIMENSIONS_CACHE = 1400;
+  const IMAGE_DIMENSIONS_TTL_MS = 6 * 60 * 60 * 1000;
+
+  /** Batched localStorage writes for measured heights (avoid sync IO on every resize). */
+  const pendingHeightWritesRef = useRef<Map<string, Record<string, number>>>(new Map());
+  const flushIdleCallbackIdRef = useRef<number | null>(null);
+  const flushTimeoutIdRef = useRef<number | null>(null);
+
+  const pruneMapByTouchedAt = useCallback(
+    (
+      cache: Map<string, unknown>,
+      touchedAt: Map<string, number>,
+      maxEntries: number,
+      ttlMs?: number
+    ) => {
+      const now = Date.now();
+      let trimmedByTtl = 0;
+      if (ttlMs) {
+        for (const [key, ts] of touchedAt.entries()) {
+          if (now - ts > ttlMs) {
+            touchedAt.delete(key);
+            cache.delete(key);
+            trimmedByTtl += 1;
+          }
+        }
+      }
+      if (cache.size <= maxEntries) return;
+      const entries = Array.from(touchedAt.entries()).sort((a, b) => a[1] - b[1]);
+      const pruneCount = cache.size - maxEntries;
+      let trimmedByMax = 0;
+      for (let i = 0; i < pruneCount && i < entries.length; i += 1) {
+        const key = entries[i][0];
+        touchedAt.delete(key);
+        cache.delete(key);
+        trimmedByMax += 1;
+      }
+      if (trimmedByTtl > 0 || trimmedByMax > 0) {
+        recordFeedMetric("memory_cache", 0, {
+          action: "prune_dimension_cache",
+          trimmedByTtl,
+          trimmedByMax,
+          maxEntries,
+          cacheSize: cache.size,
+        });
+      }
+    },
+    []
+  );
+
+  const getCachedImageDimensions = useCallback((url: string): ImageDimensions | undefined => {
+    const cached = imageDimensionsCache.current.get(url);
+    if (!cached) return undefined;
+    const now = Date.now();
+    const touchedAt = imageDimensionsTouchedAt.current.get(url) ?? 0;
+    if (touchedAt > 0 && now - touchedAt > IMAGE_DIMENSIONS_TTL_MS) {
+      imageDimensionsTouchedAt.current.delete(url);
+      imageDimensionsCache.current.delete(url);
+      return undefined;
+    }
+    imageDimensionsTouchedAt.current.set(url, now);
+    // Touch entry for LRU behavior
+    imageDimensionsCache.current.delete(url);
+    imageDimensionsCache.current.set(url, cached);
+    return cached;
+  }, []);
+
+  const setCachedImageDimensions = useCallback(
+    (url: string, dimensions: ImageDimensions) => {
+      const now = Date.now();
+      imageDimensionsCache.current.delete(url);
+      imageDimensionsCache.current.set(url, dimensions);
+      imageDimensionsTouchedAt.current.set(url, now);
+      pruneMapByTouchedAt(
+        imageDimensionsCache.current as unknown as Map<string, unknown>,
+        imageDimensionsTouchedAt.current,
+        MAX_IMAGE_DIMENSIONS_CACHE,
+        IMAGE_DIMENSIONS_TTL_MS
+      );
+    },
+    [pruneMapByTouchedAt]
+  );
+
+  const setCachedNoteDimensions = useCallback(
+    (noteId: string, dimensions: NoteDimensions) => {
+      const now = Date.now();
+      noteDimensionsCache.current.delete(noteId);
+      noteDimensionsCache.current.set(noteId, dimensions);
+      noteDimensionsTouchedAt.current.set(noteId, now);
+      pruneMapByTouchedAt(
+        noteDimensionsCache.current as unknown as Map<string, unknown>,
+        noteDimensionsTouchedAt.current,
+        MAX_NOTE_DIMENSIONS_CACHE
+      );
+    },
+    [pruneMapByTouchedAt]
+  );
 
   // Constants for height calculations - more precise values
   const HEADER_HEIGHT = 0; // Remove header height as it's not needed for profile notes
@@ -149,7 +250,7 @@ export const useNoteDynamicHeight = (options: NoteDynamicHeightOptions) => {
 
       // Get actual dimensions from cache if available
       const actualDimensions = imageUrls
-        .map(url => imageDimensionsCache.current.get(url))
+        .map((url) => getCachedImageDimensions(url))
         .filter(Boolean) as ImageDimensions[];
 
       // Use actual dimensions if we have them for all images
@@ -181,7 +282,7 @@ export const useNoteDynamicHeight = (options: NoteDynamicHeightOptions) => {
         }
       }
     },
-    [isMobile, imageMode, useAscii, calculateDynamicImageHeight]
+    [isMobile, imageMode, useAscii, calculateDynamicImageHeight, getCachedImageDimensions]
   );
 
   // Calculate video placeholder height
@@ -311,7 +412,7 @@ export const useNoteDynamicHeight = (options: NoteDynamicHeightOptions) => {
       // Apply min/max constraints
       totalHeight = Math.max(MIN_NOTE_HEIGHT, Math.min(MAX_NOTE_HEIGHT, totalHeight));
 
-      return {
+      const dimensions: NoteDimensions = {
         estimatedHeight: totalHeight,
         textLines: textDimensions.lines,
         hasImages: hasImages && imageMode, // Only true if images exist AND imageMode is enabled
@@ -319,8 +420,12 @@ export const useNoteDynamicHeight = (options: NoteDynamicHeightOptions) => {
         hasText,
         isTextTruncated: textDimensions.isTruncated,
         imageCount: imageUrls.length,
-        actualImageDimensions: imageUrls.map(url => imageDimensionsCache.current.get(url)).filter(Boolean) as ImageDimensions[],
+        actualImageDimensions: imageUrls
+          .map((url) => getCachedImageDimensions(url))
+          .filter(Boolean) as ImageDimensions[],
       };
+      setCachedNoteDimensions(note.id, dimensions);
+      return dimensions;
     },
     [
       imageMode,
@@ -334,6 +439,8 @@ export const useNoteDynamicHeight = (options: NoteDynamicHeightOptions) => {
       MAX_NOTE_HEIGHT,
       MOBILE_BUFFER,
       DESKTOP_CONTENT_BUFFER,
+      getCachedImageDimensions,
+      setCachedNoteDimensions,
     ]
   );
 
@@ -364,6 +471,68 @@ export const useNoteDynamicHeight = (options: NoteDynamicHeightOptions) => {
     }
   }, []);
 
+  const flushPendingHeightSaves = useCallback(() => {
+    flushIdleCallbackIdRef.current = null;
+    flushTimeoutIdRef.current = null;
+    const pending = pendingHeightWritesRef.current;
+    if (pending.size === 0) return;
+    pending.forEach((heights, profileKey) => {
+      try {
+        const saved = getSavedHeights(profileKey);
+        Object.assign(saved, heights);
+        saveHeights(profileKey, saved);
+      } catch {
+        /* ignore */
+      }
+    });
+    pending.clear();
+  }, [getSavedHeights, saveHeights]);
+
+  const schedulePendingHeightFlush = useCallback(() => {
+    if (flushIdleCallbackIdRef.current != null || flushTimeoutIdRef.current != null) {
+      return;
+    }
+    const run = () => flushPendingHeightSaves();
+    if (typeof requestIdleCallback !== "undefined") {
+      flushIdleCallbackIdRef.current = requestIdleCallback(
+        () => {
+          flushIdleCallbackIdRef.current = null;
+          run();
+        },
+        { timeout: 2500 }
+      ) as unknown as number;
+    } else {
+      flushTimeoutIdRef.current = window.setTimeout(() => {
+        flushTimeoutIdRef.current = null;
+        run();
+      }, 400);
+    }
+  }, [flushPendingHeightSaves]);
+
+  useEffect(() => {
+    const flush = () => flushPendingHeightSaves();
+    const onVisibility = () => {
+      if (typeof document !== "undefined" && document.visibilityState === "hidden") {
+        flush();
+      }
+    };
+    window.addEventListener("pagehide", flush);
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      window.removeEventListener("pagehide", flush);
+      document.removeEventListener("visibilitychange", onVisibility);
+      if (flushIdleCallbackIdRef.current != null && typeof cancelIdleCallback !== "undefined") {
+        cancelIdleCallback(flushIdleCallbackIdRef.current as any);
+        flushIdleCallbackIdRef.current = null;
+      }
+      if (flushTimeoutIdRef.current != null) {
+        clearTimeout(flushTimeoutIdRef.current);
+        flushTimeoutIdRef.current = null;
+      }
+      flush();
+    };
+  }, [flushPendingHeightSaves]);
+
   // Dynamic height estimator function for react-virtual
   const createHeightEstimator = useCallback(
     (notes: Note[], profileKey?: string) => {
@@ -385,8 +554,11 @@ export const useNoteDynamicHeight = (options: NoteDynamicHeightOptions) => {
         }
         
         // Then check runtime cache
-        const cachedDimensions = noteDimensionsCache.current.get(note.id);
+      const cachedDimensions = noteDimensionsCache.current.get(note.id);
         if (cachedDimensions) {
+        noteDimensionsTouchedAt.current.set(note.id, Date.now());
+        noteDimensionsCache.current.delete(note.id);
+        noteDimensionsCache.current.set(note.id, cachedDimensions);
           return cachedDimensions.estimatedHeight;
         }
         
@@ -409,17 +581,32 @@ export const useNoteDynamicHeight = (options: NoteDynamicHeightOptions) => {
       const existing = noteDimensionsCache.current.get(noteId);
       if (existing) {
         existing.estimatedHeight = actualHeight;
-        noteDimensionsCache.current.set(noteId, existing);
+        setCachedNoteDimensions(noteId, existing);
+      } else {
+        setCachedNoteDimensions(noteId, {
+          estimatedHeight: actualHeight,
+          textLines: 0,
+          hasImages: false,
+          hasVideos: false,
+          hasText: false,
+          isTextTruncated: false,
+          imageCount: 0,
+          actualImageDimensions: [],
+        });
       }
-      
-      // Save to localStorage if we have a profile key
+
+      // Queue localStorage merge (batched) instead of writing on every resize tick
       if (profileKey) {
-        const savedHeights = getSavedHeights(profileKey);
-        savedHeights[noteId] = actualHeight;
-        saveHeights(profileKey, savedHeights);
+        let bucket = pendingHeightWritesRef.current.get(profileKey);
+        if (!bucket) {
+          bucket = {};
+          pendingHeightWritesRef.current.set(profileKey, bucket);
+        }
+        bucket[noteId] = actualHeight;
+        schedulePendingHeightFlush();
       }
     },
-    [getSavedHeights, saveHeights]
+    [schedulePendingHeightFlush, setCachedNoteDimensions]
   );
 
   // Store image dimensions when they load
@@ -432,7 +619,7 @@ export const useNoteDynamicHeight = (options: NoteDynamicHeightOptions) => {
       };
       
       const wasAlreadyCached = imageDimensionsCache.current.has(imageUrl);
-      imageDimensionsCache.current.set(imageUrl, imageDimensions);
+      setCachedImageDimensions(imageUrl, imageDimensions);
       
       // Clear the note's cached dimensions so it gets recalculated
       noteDimensionsCache.current.delete(noteId);
@@ -445,7 +632,7 @@ export const useNoteDynamicHeight = (options: NoteDynamicHeightOptions) => {
         }, 50);
       }
     },
-    [onHeightChange]
+    [onHeightChange, setCachedImageDimensions]
   );
 
   // Get container width for dynamic calculations
@@ -497,7 +684,7 @@ export const useNoteDynamicHeight = (options: NoteDynamicHeightOptions) => {
       }
       totalHeight = Math.max(MIN_NOTE_HEIGHT, Math.min(MAX_NOTE_HEIGHT, totalHeight));
 
-      return {
+      const dimensions: NoteDimensions = {
         estimatedHeight: totalHeight,
         textLines: textDimensions.lines,
         hasImages: hasImages && imageMode,
@@ -505,8 +692,12 @@ export const useNoteDynamicHeight = (options: NoteDynamicHeightOptions) => {
         hasText,
         isTextTruncated: textDimensions.isTruncated,
         imageCount: imageUrls.length,
-        actualImageDimensions: imageUrls.map(url => imageDimensionsCache.current.get(url)).filter(Boolean) as ImageDimensions[],
+        actualImageDimensions: imageUrls
+          .map((url) => getCachedImageDimensions(url))
+          .filter(Boolean) as ImageDimensions[],
       };
+      setCachedNoteDimensions(note.id, dimensions);
+      return dimensions;
     },
     [
       imageMode,
@@ -520,13 +711,23 @@ export const useNoteDynamicHeight = (options: NoteDynamicHeightOptions) => {
       MAX_NOTE_HEIGHT,
       MOBILE_BUFFER,
       DESKTOP_CONTENT_BUFFER,
+      getCachedImageDimensions,
+      setCachedNoteDimensions,
     ]
   );
 
-  // Clear cache for performance
+  /** Invalidate only per-note height estimates (keep image URL dimensions warm). */
+  const clearNoteDimensionsCache = useCallback(() => {
+    noteDimensionsCache.current.clear();
+    noteDimensionsTouchedAt.current.clear();
+  }, []);
+
+  /** Full clear (e.g. rare reset paths). */
   const clearDimensionsCache = useCallback(() => {
     imageDimensionsCache.current.clear();
+    imageDimensionsTouchedAt.current.clear();
     noteDimensionsCache.current.clear();
+    noteDimensionsTouchedAt.current.clear();
   }, []);
 
   // Get cached image dimensions for persistence
@@ -541,14 +742,16 @@ export const useNoteDynamicHeight = (options: NoteDynamicHeightOptions) => {
   // Restore cached image dimensions from scroll restoration
   const restoreImageDimensionsCache = useCallback((cache: Record<string, { width: number; height: number }>) => {
     Object.entries(cache).forEach(([url, dimensions]) => {
-      imageDimensionsCache.current.set(url, {
+      setCachedImageDimensions(url, {
         width: dimensions.width,
         height: dimensions.height,
         aspectRatio: dimensions.width / dimensions.height,
       });
     });
-    console.log(`🔄 Restored ${Object.keys(cache).length} cached image dimensions`);
-  }, []);
+    if (import.meta.env.DEV) {
+      console.log(`🔄 Restored ${Object.keys(cache).length} cached image dimensions`);
+    }
+  }, [setCachedImageDimensions]);
 
   return {
     calculateNoteDimensions,
@@ -558,6 +761,7 @@ export const useNoteDynamicHeight = (options: NoteDynamicHeightOptions) => {
     recordActualHeight,
     calculateWithContainerWidth,
     clearDimensionsCache,
+    clearNoteDimensionsCache,
     getImageDimensionsCache,
     restoreImageDimensionsCache,
   };

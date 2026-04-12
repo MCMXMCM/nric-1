@@ -15,11 +15,10 @@ import { useDisplayNames } from "../hooks/useDisplayNames";
 import { useRelayManager } from "../hooks/useRelayManager";
 import { useMuteList } from "../hooks/useMuteList";
 import { useNostrFeedState } from "../hooks/useNostrFeedState";
-import { useNostrOperations } from "../hooks/useNostrOperations";
 import { useNote } from "../hooks/useNote";
-import { useRelayConnectionStatus } from "../hooks/useRelayConnectionStatus";
 import { DEFAULT_RELAY_URLS } from "../utils/nostr/constants";
 import { useQueryClient } from "@tanstack/react-query";
+import { CACHE_KEYS } from "../utils/cacheKeys";
 
 import { nip19 } from "nostr-tools";
 import { getGlobalRelayPool } from "../utils/nostr/relayConnectionPool";
@@ -50,8 +49,11 @@ const NoteView: React.FC = () => {
   const [error, setError] = useState<string | null>(null);
   const [showZapModal, setShowZapModal] = useState<boolean>(false);
 
-  // Pool ref for useNote hook
+  // Pool ref for useNote hook (sync init so first query is not blocked until useEffect runs)
   const poolRef = useRef<ReturnType<typeof getGlobalRelayPool> | null>(null);
+  if (!poolRef.current) {
+    poolRef.current = getGlobalRelayPool();
+  }
 
   // Parse modal state from URL
   const modalState = useMemo(() => {
@@ -162,9 +164,6 @@ const NoteView: React.FC = () => {
     pubkeyHex: pubkey,
   });
 
-  // Check relay connection status
-  const { hasMinimumConnections, isConnecting } = useRelayConnectionStatus();
-
   // Get the current user's mute list
   const { mutedPubkeys } = useMuteList(readRelays);
 
@@ -176,59 +175,6 @@ const NoteView: React.FC = () => {
   } = useDisplayNames(readRelays);
 
   const queryClient = useQueryClient();
-
-  const operationsConfig = {
-    isPageVisible: true,
-    isFetchingPage: false,
-    isRateLimited: false,
-    setIsRateLimited: state.setIsRateLimited,
-    setIsInitialized: state.setIsInitialized,
-    notes: state.notes,
-    setNotes: state.setNotes,
-    currentIndex: state.currentIndex,
-    updateCurrentIndex: (i: number) => state.updateCurrentIndex(i),
-    setCurrentIndex: state.setCurrentIndex,
-    displayIndex: state.displayIndex,
-    setDisplayIndex: state.setDisplayIndex,
-    setHasMorePages: state.setHasMorePages,
-    setIsFetchingPage: state.setIsFetchingPage,
-    metadata: state.metadata,
-    setMetadata: state.setMetadata,
-    setContacts: state.setContacts,
-    setIsLoadingContacts: state.setIsLoadingContacts,
-    setContactLoadError: state.setContactLoadError,
-    setContactStatus: state.setContactStatus,
-    setCacheStats: state.setCacheStats,
-    showReplies: state.showReplies,
-    showReposts: state.showReposts,
-    nsfwBlock: state.nsfwBlock,
-    customHashtags: state.customHashtags,
-    contacts: state.contacts,
-    mutedPubkeys,
-    isMobile: state.isMobile,
-    isCheckingForNewNotes: state.isCheckingForNewNotes,
-    setIsCheckingForNewNotes: state.setIsCheckingForNewNotes,
-    newNotesFound: state.newNotesFound,
-    setNewNotesFound: state.setNewNotesFound,
-    showNoNewNotesMessage: state.showNoNewNotesMessage,
-    setShowNoNewNotesMessage: state.setShowNoNewNotesMessage,
-    relayUrls: readRelays,
-    onNoRelays: () => {},
-    fetchDisplayNames,
-    addDisplayNamesFromMetadata,
-    getPubkeysNeedingFetch,
-    // TanStack Query client for cache invalidation
-    queryClient,
-  };
-
-  const operations = useNostrOperations(operationsConfig);
-
-  // Initialize pool for useNote hook
-  useEffect(() => {
-    if (!poolRef.current) {
-      poolRef.current = getGlobalRelayPool();
-    }
-  }, []);
 
   // Build augmented relays function for useNote
   const buildAugmentedRelays = useCallback(
@@ -275,10 +221,18 @@ const NoteView: React.FC = () => {
     }
   }, [location.state]);
 
-  // Build enhanced relay list that includes contact relays (same as feed)
-  const enhancedRelayUrls = useMemo(() => {
-    return operations.buildFollowFilterRelays(readRelays);
-  }, [operations, readRelays]);
+  // Keep note-detail fetches focused: prefer a smaller prioritized relay set
+  // (base read relays + nevent hints) before broad fan-out.
+  const noteQueryRelayUrls = useMemo(() => {
+    const base = readRelays.slice(0, 8);
+    const augmented = buildAugmentedRelays(base, hintTags);
+    return augmented.slice(0, 12);
+  }, [buildAugmentedRelays, hintTags, readRelays]);
+
+  useEffect(() => {
+    if (!hexNoteId || !cachedNote || cachedNote.id !== hexNoteId) return;
+    queryClient.setQueryData(CACHE_KEYS.NOTE(hexNoteId), cachedNote);
+  }, [cachedNote, hexNoteId, queryClient]);
 
   // Use the modern useNote hook for caching and loading
   const {
@@ -288,8 +242,8 @@ const NoteView: React.FC = () => {
     refetch,
   } = useNote({
     noteId: hexNoteId || "",
-    relayUrls: enhancedRelayUrls,
-    enabled: !!hexNoteId && enhancedRelayUrls.length > 0,
+    relayUrls: noteQueryRelayUrls,
+    enabled: !!hexNoteId && noteQueryRelayUrls.length > 0,
     poolRef,
     buildAugmentedRelays,
     hintTags,
@@ -402,18 +356,15 @@ const NoteView: React.FC = () => {
     useColor: s.useColor,
   }));
 
-  // Show loading state while relays are connecting or note is loading
-  if ((isConnecting && !hasMinimumConnections) || (isLoading && !note)) {
-    const message =
-      isConnecting && !hasMinimumConnections
-        ? "Connecting to relays..."
-        : isBroadeningRelays
-          ? "Broadening relay set..."
-          : "Loading note...";
+  // Show loading while fetching; do not block on relay "connected" status (queries can start immediately)
+  if (isLoading && !effectiveNote) {
+    const message = isBroadeningRelays
+      ? "Broadening relay set..."
+      : "Loading note...";
     return <StandardLoader message={message} alignWithSplash={true} />;
   }
 
-  if (error || !note) {
+  if (error || !effectiveNote) {
     return (
       <div
         style={{
@@ -546,7 +497,7 @@ const NoteView: React.FC = () => {
                   <NoteCard
                     note={effectiveNote}
                     index={0}
-                    metadata={state.metadata}
+                    authorMetadata={state.metadata?.[effectiveNote.pubkey] ?? null}
                     asciiCache={state.asciiCache}
                     isDarkMode={state.isDarkMode}
                     useAscii={uiUseAscii}
@@ -569,6 +520,7 @@ const NoteView: React.FC = () => {
                     updateRepostModalState={updateRepostModalState}
                     onHashtagClick={handleHashtagClick}
                     showFullContent={true}
+                    deferHeavyQueries={true}
                   />
                 </NoteCardErrorBoundary>
               </div>

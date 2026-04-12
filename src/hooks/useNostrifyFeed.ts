@@ -1,6 +1,6 @@
 import { useQuery, useInfiniteQuery, useQueryClient } from '@tanstack/react-query';
 import { useNostr } from '@nostrify/react';
-import { useCallback, useMemo, useEffect } from 'react';
+import { useCallback, useMemo, useEffect, useRef } from 'react';
 // import { getOutboxRouter } from '../utils/nostr/outboxRouter';
 import type { Filter, Event } from 'nostr-tools';
 import type { Note } from '../types/nostr/types';
@@ -9,6 +9,7 @@ import { isNsfwNote } from '../utils/nsfwFilter';
 import { acquireQuerySlot, releaseQuerySlot } from '../utils/nostr/queryThrottle';
 import { useUIStore } from '../components/lib/useUIStore';
 import { useNostrifyMigration } from '../contexts/NostrifyMigrationProvider';
+import { startFeedMetric } from '../utils/nostr/feedPerformanceMetrics';
 
 interface UseNostrifyFeedConfig {
   relayUrls: string[];
@@ -48,7 +49,7 @@ export function useNostrifyFeed(config: UseNostrifyFeedConfig): UseNostrifyFeedR
   const { nostr } = useNostr();
   const queryClient = useQueryClient();
   const outboxModeEnabled = useUIStore((s) => s.outboxMode);
-  const { resetPool, isPoolReady } = useNostrifyMigration();
+  const { isPoolReady } = useNostrifyMigration();
   const {
     relayUrls,
     filter,
@@ -60,7 +61,7 @@ export function useNostrifyFeed(config: UseNostrifyFeedConfig): UseNostrifyFeedR
     mutedPubkeys = [],
     customHashtags = [],
     maximumAgeDays = null,
-    maxPagesInMemory: _maxPagesInMemory, // No longer used - Virtual handles memory efficiently
+    maxPagesInMemory = 50,
     firstPageSinceDays = 30
   } = config;
 
@@ -210,8 +211,8 @@ export function useNostrifyFeed(config: UseNostrifyFeedConfig): UseNostrifyFeedR
           videoUrls,
           receivedAt: Date.now()
         };
-      })
-      .sort((a, b) => b.created_at - a.created_at);
+      });
+    // Sort once in allNotes over merged pages (avoids per-page + global double sort).
   }, [showReplies, showReposts, nsfwBlock, mutedPubkeys, customHashtags]);
 
   // Infinite query for paginated feed
@@ -403,6 +404,19 @@ export function useNostrifyFeed(config: UseNostrifyFeedConfig): UseNostrifyFeedR
         // Use the relays provided by the caller (no discovery-mode switching)
         const effectiveRelayUrls = relayUrls;
         const effectiveTimeout = finalTimeoutMs;
+        const finishFeedMetric = startFeedMetric('feed_query', {
+          relays: effectiveRelayUrls.length,
+          timeoutMs: effectiveTimeout,
+          isFirstPage: isFirstPage === true,
+          isFollowingFeed,
+          authorCount: queryFilter.authors?.length || 0,
+        });
+        let metricRecorded = false;
+        const completeFeedMetric = (metadata?: Record<string, unknown>) => {
+          if (metricRecorded) return;
+          metricRecorded = true;
+          finishFeedMetric(metadata);
+        };
 
         // Acquire throttle slot before querying
         const slotId = await acquireQuerySlot('feed');
@@ -423,13 +437,20 @@ export function useNostrifyFeed(config: UseNostrifyFeedConfig): UseNostrifyFeedR
               });
             }
             const queryPromise = nostr.query([queryFilter]) as Promise<any[]>;
+            let timeoutId: ReturnType<typeof setTimeout> | null = null;
             const timeoutPromise = new Promise<any[]>((_, reject) => {
-              setTimeout(() => {
+              timeoutId = setTimeout(() => {
                 const elapsed = Date.now() - queryStartTime;
                 reject(new Error(`Query timeout after ${elapsed}ms`));
               }, effectiveTimeout);
             });
-            return Promise.race([queryPromise, timeoutPromise]);
+            try {
+              return await Promise.race([queryPromise, timeoutPromise]);
+            } finally {
+              if (timeoutId) {
+                clearTimeout(timeoutId);
+              }
+            }
           };
 
           // Enhanced retry strategy: more attempts for profile queries with better error handling
@@ -472,15 +493,6 @@ export function useNostrifyFeed(config: UseNostrifyFeedConfig): UseNostrifyFeedR
                 } else if (isFollowingFeed) {
                   // For following feeds, always throw the error to show proper error state
                   console.warn(`⚠️ Following feed query failed after ${attempts} attempts: ${lastError.message}`);
-                  // On timeout, reset relay pool so next retry uses fresh connections
-                  if (lastError.message.includes('timeout')) {
-                    try {
-                      console.warn('🔄 Resetting relay pool after timeout...');
-                      resetPool();
-                    } catch (e) {
-                      console.warn('⚠️ Failed to reset relay pool:', e);
-                    }
-                  }
                   throw lastError;
                 } else {
                   throw lastError;
@@ -546,6 +558,12 @@ export function useNostrifyFeed(config: UseNostrifyFeedConfig): UseNostrifyFeedR
             }
           }
 
+          completeFeedMetric({
+            status: 'ok',
+            durationMs: queryDuration,
+            events: events.length,
+            notes: notes.length,
+          });
           return {
             notes,
             nextCursor: computedNextCursor,
@@ -557,6 +575,11 @@ export function useNostrifyFeed(config: UseNostrifyFeedConfig): UseNostrifyFeedR
           (globalThis as any).__nostrifyRecentFailures = ((globalThis as any).__nostrifyRecentFailures || 0) + 1;
           
           const errorMessage = (error as Error).message;
+          completeFeedMetric({
+            status: 'error',
+            error: errorMessage,
+            failureCount: (globalThis as any).__nostrifyRecentFailures,
+          });
           console.error('❌ Nostrify query failed:', {
             error: errorMessage,
             browser: /Safari/.test(navigator.userAgent) && !/Chrome/.test(navigator.userAgent) ? 'Safari' : 'Other',
@@ -592,12 +615,17 @@ export function useNostrifyFeed(config: UseNostrifyFeedConfig): UseNostrifyFeedR
           try {
             releaseQuerySlot(slotId);
           } catch {}
+          completeFeedMetric({ status: 'slot_released' });
         }
       } catch (error) {
         // Increment failure counter for circuit breaker
         (globalThis as any).__nostrifyRecentFailures = ((globalThis as any).__nostrifyRecentFailures || 0) + 1;
         
         const errorMessage = (error as Error).message;
+        startFeedMetric('feed_query')({
+          status: 'slot_error',
+          error: errorMessage,
+        });
         console.error('❌ Nostrify query failed:', {
           error: errorMessage,
           browser: /Safari/.test(navigator.userAgent) && !/Chrome/.test(navigator.userAgent) ? 'Safari' : 'Other',
@@ -642,19 +670,24 @@ export function useNostrifyFeed(config: UseNostrifyFeedConfig): UseNostrifyFeedR
         }
       }
 
-      // If the last few pages were empty, give up - relays have no more data
+      // If the last few pages were empty, give up - relays have no more data.
+      // With hashtag filters, sparse matches can produce runs of empty pages
+      // even though older matches still exist, so do not stop early there.
       const lastFive = allPages.slice(-5);
-      if (lastFive.length >= 5 && lastFive.every((p: any) => !p.notes || p.notes.length === 0)) {
-        console.log('🛑 Feed pagination stopped: last 5 pages were empty, no more data available');
+      const hasHashtagFilter = Array.isArray(customHashtags) && customHashtags.length > 0;
+      if (!hasHashtagFilter && lastFive.length >= 5 && lastFive.every((p: any) => !p.notes || p.notes.length === 0)) {
+        if (import.meta.env.DEV) {
+          console.log('🛑 Feed pagination stopped: last 5 pages were empty, no more data available');
+        }
         return undefined;
       }
 
-      // Generous page cap to allow scrolling back years
-      // Note: maxPagesInMemory is for memory management (pruning), NOT pagination limits
-      // Allow up to 500 pages of pagination (with pruning keeping only maxPagesInMemory in RAM)
-      const MAX_PAGINATION_PAGES = 500;
+      // Cap pagination to bound CPU/memory on long sessions (still plenty of scroll-back).
+      const MAX_PAGINATION_PAGES = 150;
       if (allPages.length >= MAX_PAGINATION_PAGES) {
-        console.log(`🛑 Feed pagination stopped: reached maximum pages limit (${MAX_PAGINATION_PAGES})`);
+        if (import.meta.env.DEV) {
+          console.log(`🛑 Feed pagination stopped: reached maximum pages limit (${MAX_PAGINATION_PAGES})`);
+        }
         return undefined;
       }
 
@@ -714,11 +747,58 @@ export function useNostrifyFeed(config: UseNostrifyFeedConfig): UseNostrifyFeedR
     });
   }
 
-  // NOTE: Manual page pruning removed - TanStack Virtual handles memory efficiently
-  // by only rendering visible items (~10 on mobile). Pruning causes jittering because
-  // it changes the data array length, forcing Virtual to recalculate all positions.
-  // Modern mobile devices have plenty of RAM for note data (~500KB for 1000 notes).
-  // Images are managed by the browser and unmount when components are off-screen.
+  // Trim oldest infinite-query pages to cap RAM/CPU on very long sessions (newest pages first).
+  useEffect(() => {
+    queryClient.setQueryData(queryKey, (old: any) => {
+      if (!old?.pages?.length) return old;
+      if (old.pages.length <= maxPagesInMemory) return old;
+      const totalPages = old.pages.length;
+      const keepNewestCount = Math.max(2, Math.floor(maxPagesInMemory * 0.4));
+      const keepOldestCount = Math.max(1, maxPagesInMemory - keepNewestCount);
+      const newestPages = old.pages.slice(0, keepNewestCount);
+      const oldestPages = old.pages.slice(Math.max(keepNewestCount, totalPages - keepOldestCount));
+      const mergedPages = [...newestPages, ...oldestPages];
+      const dedupedPages = mergedPages.filter(
+        (page, index, arr) => arr.findIndex((candidate) => candidate?.nextCursor === page?.nextCursor && candidate?.requestedUntil === page?.requestedUntil) === index
+      );
+      const next: any = {
+        ...old,
+        pages: dedupedPages.slice(0, maxPagesInMemory),
+      };
+      if (Array.isArray(old.pageParams)) {
+        const newestParams = old.pageParams.slice(0, keepNewestCount);
+        const oldestParams = old.pageParams.slice(Math.max(keepNewestCount, old.pageParams.length - keepOldestCount));
+        next.pageParams = [...newestParams, ...oldestParams].slice(0, maxPagesInMemory);
+      }
+      return next;
+    });
+  }, [infiniteQuery.data?.pages?.length, maxPagesInMemory, queryClient, queryKey]);
+
+  const feedIdentity = useMemo(
+    () =>
+      [
+        authorKey,
+        kindsKey,
+        relayKey,
+        flagsKey,
+        hashtagsKey,
+        String(pageSize),
+        [...(mutedPubkeys || [])].sort().join(','),
+      ].join('|'),
+    [authorKey, kindsKey, relayKey, flagsKey, hashtagsKey, pageSize, mutedPubkeys]
+  );
+
+  const feedMergeRef = useRef<{
+    pagesLen: number;
+    dataUpdatedAt: number;
+    feedIdentity: string;
+    byId: Map<string, Note>;
+  }>({
+    pagesLen: 0,
+    dataUpdatedAt: 0,
+    feedIdentity: '',
+    byId: new Map(),
+  });
 
   // Robust refresh: cancel, hard-remove, and invalidate to force clean re-fetch
   const refresh = async () => {
@@ -749,16 +829,54 @@ export function useNostrifyFeed(config: UseNostrifyFeedConfig): UseNostrifyFeedR
   // to ensure the UI immediately reflects the new filter settings, even before new data is fetched.
   const allNotes = useMemo(() => {
     const pages = infiniteQuery.data?.pages as Array<{ notes: Note[] }> | undefined;
-    if (!pages) return [] as Note[];
-    const unique = new Map<string, Note>();
-    for (const page of pages) {
-      for (const n of page.notes) {
-        if (n && n.id && !unique.has(n.id)) {
-          unique.set(n.id, n);
+    const dataUpdatedAt = infiniteQuery.dataUpdatedAt;
+    if (!pages?.length) {
+      feedMergeRef.current = {
+        pagesLen: 0,
+        dataUpdatedAt: 0,
+        feedIdentity: '',
+        byId: new Map(),
+      };
+      return [] as Note[];
+    }
+
+    const ref = feedMergeRef.current;
+    const needsFullRebuild =
+      pages.length < ref.pagesLen ||
+      feedIdentity !== ref.feedIdentity ||
+      (pages.length === ref.pagesLen && dataUpdatedAt !== ref.dataUpdatedAt);
+
+    let unique: Map<string, Note>;
+    if (needsFullRebuild) {
+      unique = new Map<string, Note>();
+      for (const page of pages) {
+        for (const n of page.notes || []) {
+          if (n?.id) unique.set(n.id, n);
         }
       }
+      feedMergeRef.current = {
+        pagesLen: pages.length,
+        dataUpdatedAt,
+        feedIdentity,
+        byId: unique,
+      };
+    } else if (pages.length > ref.pagesLen) {
+      unique = ref.byId;
+      for (let i = ref.pagesLen; i < pages.length; i++) {
+        for (const n of pages[i]?.notes || []) {
+          if (n?.id) unique.set(n.id, n);
+        }
+      }
+      feedMergeRef.current = {
+        ...ref,
+        pagesLen: pages.length,
+        dataUpdatedAt,
+        byId: unique,
+      };
+    } else {
+      unique = ref.byId;
     }
-    
+
     // Apply active filter options to cached notes
     // This ensures filters work correctly when toggled on/off, even with cached data
     const filteredNotes = Array.from(unique.values()).filter(note => {
@@ -791,7 +909,16 @@ export function useNostrifyFeed(config: UseNostrifyFeedConfig): UseNostrifyFeedR
     });
     
     return filteredNotes.sort((a, b) => b.created_at - a.created_at);
-  }, [infiniteQuery.data, showReplies, showReposts, nsfwBlock, mutedPubkeys, customHashtags]);
+  }, [
+    infiniteQuery.data?.pages,
+    infiniteQuery.dataUpdatedAt,
+    feedIdentity,
+    showReplies,
+    showReposts,
+    nsfwBlock,
+    mutedPubkeys,
+    customHashtags,
+  ]);
 
   // Enhanced loading state with timeout protection
   const isLoading = useMemo(() => {
@@ -881,8 +1008,7 @@ export function useNostrifySimpleFeed(config: UseNostrifyFeedConfig): UseNostrif
           videoUrls,
           receivedAt: Date.now()
         };
-      })
-      .sort((a, b) => b.created_at - a.created_at);
+      });
   }, [showReplies, showReposts, nsfwBlock, mutedPubkeys, customHashtags]);
 
   const simpleQueryKey = ['nostrify-simple-feed', filter, relayUrls, showReplies, showReposts, nsfwBlock, mutedPubkeys, customHashtags] as const;
@@ -894,7 +1020,8 @@ export function useNostrifySimpleFeed(config: UseNostrifyFeedConfig): UseNostrif
       if (!nostr) throw new Error('Nostrify not available');
       
       const events = await nostr.query([filter]);
-      return processEvents(events);
+      const notes = processEvents(events);
+      return notes.sort((a, b) => b.created_at - a.created_at);
     },
     staleTime: 2 * 60 * 1000, // 2 minutes
     gcTime: 10 * 60 * 1000, // 10 minutes

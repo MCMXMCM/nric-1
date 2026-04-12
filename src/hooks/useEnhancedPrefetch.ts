@@ -1,4 +1,8 @@
-import { useCallback, useEffect, useRef } from 'react';
+import { useCallback, useEffect, useRef, useMemo, type MutableRefObject } from 'react';
+
+function threadReactionPrefetchLimit(): number {
+  return typeof window !== 'undefined' && window.innerWidth <= 768 ? 80 : 200;
+}
 import { useQueryClient } from '@tanstack/react-query';
 import type { Note } from '../types/nostr/types';
 // removed unused extractImageUrls import after disabling image prefetch
@@ -15,12 +19,30 @@ interface UseEnhancedPrefetchOptions {
   prefetchWindow?: number; // How many notes ahead to prefetch (default: 10)
   nostrClient?: any;
   myPubkey?: string; // For reaction prefetching (to track user's reactions)
+  /** When `.current.active`, skip expensive thread/reaction/parent prefetch. */
+  scrollActivityRef?: MutableRefObject<{ active: boolean } | null> | null;
+  /** While the feed is fetching the next page, defer heavy thread/reaction/parent work. */
+  isFetchingNextPage?: boolean;
+}
+
+function waitForMainThreadIdle(): Promise<void> {
+  return new Promise((resolve) => {
+    if (typeof requestIdleCallback !== "undefined") {
+      requestIdleCallback(() => resolve(), { timeout: 1500 });
+    } else {
+      window.setTimeout(() => resolve(), 280);
+    }
+  });
 }
 
 /**
  * Enhanced prefetching hook that preloads images, metadata, replies, and reaction counts
  * for notes that are close to the user's current position
  */
+function isMobileViewport(): boolean {
+  return typeof window !== 'undefined' && window.innerWidth <= 768;
+}
+
 export function useEnhancedPrefetch({
   notes,
   currentIndex,
@@ -28,9 +50,15 @@ export function useEnhancedPrefetch({
   enabled = true,
   prefetchWindow = 10,
   nostrClient,
-  myPubkey
+  myPubkey,
+  scrollActivityRef = null,
+  isFetchingNextPage = false,
 }: UseEnhancedPrefetchOptions) {
   const queryClient = useQueryClient();
+  const effectivePrefetchWindow = useMemo(() => {
+    const base = isMobileViewport() ? Math.min(prefetchWindow, 6) : prefetchWindow;
+    return isFetchingNextPage ? Math.min(base, 4) : base;
+  }, [prefetchWindow, isFetchingNextPage]);
   const prefetchState = usePrefetchState();
   const activeImagePrefetchesRef = useRef<Set<string>>(new Set());
   const activeMetadataPrefetchesRef = useRef<Set<string>>(new Set());
@@ -45,9 +73,10 @@ export function useEnhancedPrefetch({
   } = useParentNotePrefetch({
     notes,
     relayUrls,
-    enabled,
-    prefetchWindow,
-    currentIndex
+    enabled: enabled && !isFetchingNextPage,
+    prefetchWindow: effectivePrefetchWindow,
+    currentIndex,
+    pauseBackgroundBatch: isFetchingNextPage,
   });
 
   // Helper to check if metadata is already cached
@@ -122,7 +151,7 @@ export function useEnhancedPrefetch({
       const filter = {
         kinds: [1],
         "#e": [note.id],
-        limit: 1000,
+        limit: threadReactionPrefetchLimit(),
       } as any;
 
       const events = await nostrClient.querySync(relayUrls, filter);
@@ -199,7 +228,7 @@ export function useEnhancedPrefetch({
       await queryClient.prefetchQuery({
         queryKey,
         queryFn: async () => {
-          const filter = { kinds: [7], '#e': [note.id], limit: 1000 } as any;
+          const filter = { kinds: [7], '#e': [note.id], limit: threadReactionPrefetchLimit() } as any;
           const events = await nostrClient.querySync(relayUrls, filter);
 
           const latestByReactor = new Map<string, any>();
@@ -250,40 +279,81 @@ export function useEnhancedPrefetch({
     if (!notes || notes.length === 0) return [];
     
     // Prefetch both ahead AND behind current position
-    const startIndex = Math.max(0, currentIndex - 3);  // 3 notes behind
-    const endIndex = Math.min(notes.length, currentIndex + prefetchWindow + 1);
+    const behind = isMobileViewport() ? 2 : 3;
+    const startIndex = Math.max(0, currentIndex - behind);
+    const endIndex = Math.min(notes.length, currentIndex + effectivePrefetchWindow + 1);
     
     return notes.slice(startIndex, endIndex);
-  }, [notes, currentIndex, prefetchWindow]);
+  }, [notes, currentIndex, effectivePrefetchWindow]);
 
-  // Main prefetch effect
+  // Main prefetch effect — bounded concurrency and sequential work per note to avoid relay/CPU spikes.
   useEffect(() => {
     if (!enabled || !notes || notes.length === 0) return;
 
     const notesToPrefetch = getNotesForPrefetch();
     if (notesToPrefetch.length === 0) return;
 
-    // Prefetch all data for each note in parallel
-    const prefetchPromises = notesToPrefetch.map(async (note) => {
+    let cancelled = false;
+    const concurrency = isMobileViewport() ? 1 : 2;
+    const queue = [...notesToPrefetch];
+
+    const runOne = async (note: typeof notes[0]) => {
+      if (cancelled) return;
+      if (typeof document !== "undefined" && document.hidden) return;
       try {
-        // Prefetch images, metadata, thread, reactions, and parent notes in parallel for each note
-        await Promise.all([
-          prefetchImages(note),
-          prefetchMetadata(note.pubkey),
-          prefetchThread(note),
-          prefetchReactions(note),
-          prefetchParentNotes(note)
-        ]);
+        await prefetchImages(note);
+        await prefetchMetadata(note.pubkey);
+        if (cancelled) return;
+        if (typeof document !== "undefined" && document.hidden) return;
+        if (scrollActivityRef?.current?.active) return;
+        if (isFetchingNextPage) return;
+
+        await waitForMainThreadIdle();
+        if (cancelled) return;
+        if (typeof document !== "undefined" && document.hidden) return;
+        if (scrollActivityRef?.current?.active) return;
+        if (isFetchingNextPage) return;
+
+        if (nostrClient) {
+          await prefetchThread(note);
+          if (cancelled) return;
+          await prefetchReactions(note);
+        }
+        if (cancelled) return;
+        await prefetchParentNotes(note);
       } catch (error) {
         console.warn(`Failed to prefetch data for note ${note.id.slice(0, 8)}:`, error);
       }
+    };
+
+    const workers = Array.from({ length: concurrency }, async () => {
+      while (!cancelled && queue.length > 0) {
+        const note = queue.shift();
+        if (note) await runOne(note);
+      }
     });
 
-    // Execute all prefetches
-    Promise.all(prefetchPromises).catch(error => {
+    Promise.all(workers).catch((error) => {
       console.error('Error in enhanced prefetch batch:', error);
     });
-  }, [enabled, notes, currentIndex, prefetchWindow, getNotesForPrefetch, prefetchImages, prefetchMetadata, prefetchThread, prefetchReactions]);
+
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    enabled,
+    notes,
+    currentIndex,
+    getNotesForPrefetch,
+    prefetchImages,
+    prefetchMetadata,
+    prefetchThread,
+    prefetchReactions,
+    prefetchParentNotes,
+    nostrClient,
+    scrollActivityRef,
+    isFetchingNextPage,
+  ]);
 
   // Cleanup function
   useEffect(() => {

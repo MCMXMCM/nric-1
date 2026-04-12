@@ -13,6 +13,34 @@ import { useSessionState } from './useSessionState'
 import type { NostrFilter } from '@nostrify/nostrify'
 import { getGlobalRelayPool } from '../utils/nostr/relayConnectionPool'
 
+/** Single read path: Nostrify first; legacy pool only if Nostrify returns nothing or is unavailable. */
+async function queryNotificationsFilter(
+  nostr: { query: (f: NostrFilter[]) => Promise<unknown> } | null | undefined,
+  relayUrls: string[],
+  filter: NostrFilter
+): Promise<any[]> {
+  let nostrError: unknown = null;
+  if (nostr) {
+    try {
+      const evs = await nostr.query([filter])
+      if (Array.isArray(evs)) return evs
+    } catch (error) {
+      nostrError = error;
+    }
+  }
+  // Keep legacy pool as an explicit fallback only when Nostrify is unavailable or errored.
+  // Do not double-query on empty results from Nostrify.
+  if (nostr && !nostrError) {
+    return [];
+  }
+  try {
+    const pool = getGlobalRelayPool()
+    return await pool.querySync(relayUrls, filter as any)
+  } catch {
+    return []
+  }
+}
+
 export interface UseNotificationsNostrifyResult {
   items: ClassifiedNotification[]
   isLoading: boolean
@@ -112,7 +140,9 @@ export function useNotificationsNostrify({ relayUrls }: { relayUrls: string[] })
         queryClient.setQueryData(CACHE_KEYS.NOTE(note.id), note)
       }
 
-      console.log(`📋 Cached ${events.length} notification-related notes using nostrify`)
+      if (import.meta.env.DEV) {
+        console.log(`📋 Cached ${events.length} notification-related notes using nostrify`)
+      }
     } catch (error) {
       console.warn('Failed to cache notification notes with nostrify:', error)
     }
@@ -132,25 +162,18 @@ export function useNotificationsNostrify({ relayUrls }: { relayUrls: string[] })
     gcTime: 5 * 60_000,
     initialPageParam: undefined as number | undefined,
     queryFn: async ({ pageParam }): Promise<ClassifiedNotification[]> => {
-      // Deterministic fetching across the user's connected read relays
-      const pool = getGlobalRelayPool()
       const filters: NostrFilter[] = [
         { kinds: [7], '#p': [pubkey], limit: 50, until: pageParam },
         { kinds: [1], '#p': [pubkey], limit: 50, until: pageParam },
       ]
-      const all: any[] = []
+      const byEventId = new Map<string, any>()
       for (const f of filters) {
-        // Primary: deterministic via connected relays
-        try {
-          const evs = await pool.querySync(relayUrls, f as any)
-          all.push(...evs)
-        } catch {}
-        // Fallback/augment: nostrify client (keeps tests working and fills gaps)
-        try {
-          const evs2 = await nostr?.query([f])
-          if (Array.isArray(evs2)) all.push(...evs2)
-        } catch {}
+        const evs = await queryNotificationsFilter(nostr, relayUrls, f)
+        for (const ev of evs) {
+          if (ev?.id) byEventId.set(ev.id, ev)
+        }
       }
+      const all = Array.from(byEventId.values())
       
       // For reactions (kind 7), we need to fetch the notes being reacted to
       // to verify they're authored by the user
@@ -168,16 +191,7 @@ export function useNotificationsNostrify({ relayUrls }: { relayUrls: string[] })
       const likedNotes = new Map<string, any>()
       if (reactionNoteIds.size > 0) {
         const noteFilter: NostrFilter = { kinds: [1], ids: Array.from(reactionNoteIds), limit: reactionNoteIds.size }
-        let notes: any[] = []
-        try {
-          notes = await pool.querySync(relayUrls, noteFilter as any)
-        } catch {}
-        if (!Array.isArray(notes) || notes.length === 0) {
-          try {
-            const fromNostr = await nostr?.query([noteFilter])
-            if (Array.isArray(fromNostr)) notes = fromNostr
-          } catch {}
-        }
+        const notes = await queryNotificationsFilter(nostr, relayUrls, noteFilter)
         for (const note of notes) {
           likedNotes.set(note.id, note)
         }
@@ -262,7 +276,9 @@ export function useNotificationsNostrify({ relayUrls }: { relayUrls: string[] })
       const maximumAgeTimestamp = Date.now() / 1000 - (MAXIMUM_AGE_DAYS * 24 * 60 * 60);
       
       if (oldest < maximumAgeTimestamp) {
-        console.log(`🛑 Notifications pagination stopped: reached ${MAXIMUM_AGE_DAYS}-day limit`);
+        if (import.meta.env.DEV) {
+          console.log(`🛑 Notifications pagination stopped: reached ${MAXIMUM_AGE_DAYS}-day limit`);
+        }
         return undefined;
       }
       

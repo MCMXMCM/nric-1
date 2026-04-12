@@ -27,7 +27,8 @@ export function useReactionCountsQuery(
   noteId: string | null | undefined,
   relayUrls: string[],
   pool: SimplePool | null,
-  myPubkey?: string
+  myPubkey?: string,
+  queriesEnabled: boolean = true
 ): ReactionCountsResult {
 
   const fetchReactionCounts = useCallback(async (): Promise<ReactionCountsData> => {
@@ -41,8 +42,9 @@ export function useReactionCountsQuery(
       };
     }
 
-    const filter: Filter = { kinds: [7], '#e': [noteId], limit: 1000 } as any;
-    const events: Event[] = await pool.querySync(relayUrls, filter);
+    const scopedRelayUrls = Array.from(new Set(relayUrls)).slice(0, 8);
+    const filter: Filter = { kinds: [7], '#e': [noteId], limit: 300 } as any;
+    const events: Event[] = await pool.querySync(scopedRelayUrls, filter);
     
     const latestByReactor = new Map<string, Event>();
     for (const ev of events) {
@@ -86,7 +88,7 @@ export function useReactionCountsQuery(
   } = useQuery({
     queryKey: CACHE_KEYS.REACTION_COUNTS(noteId || ''),
     queryFn: fetchReactionCounts,
-    enabled: Boolean(noteId && pool && relayUrls.length > 0),
+    enabled: Boolean(noteId && pool && relayUrls.length > 0 && queriesEnabled),
     staleTime: 30000, // 30 seconds
     gcTime: 5 * 60 * 1000, // 5 minutes
   });

@@ -173,7 +173,16 @@ export class UnifiedConnectionManager {
       throw new Error('SimplePool not initialized');
     }
 
-    return this.simplePool.subscribeMany(relayUrls, filters, params);
+    if (filters.length === 0) {
+      return { close: () => {} };
+    }
+    if (filters.length === 1) {
+      return this.simplePool.subscribeMany(relayUrls, filters[0], params);
+    }
+    const requests = relayUrls.flatMap((url) =>
+      filters.map((filter) => ({ url, filter }))
+    );
+    return this.simplePool.subscribeMap(requests, params);
   }
 
   /**

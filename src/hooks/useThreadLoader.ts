@@ -4,6 +4,9 @@ import { useThreadStore } from "../state/threadStore";
 import { processEventsInWorker } from "../workers/threadWorkerBridge";
 import { CACHE_KEYS } from "../utils/cacheKeys";
 import type { Note } from "../types/nostr/types";
+import { queryWithNostrifyPoolFallback } from "../utils/nostr/nostrifyPoolQuery";
+import type { NostrFilter } from "@nostrify/nostrify";
+import { startFeedMetric } from "../utils/nostr/feedPerformanceMetrics";
 
 interface UseThreadLoaderProps {
   rootId: string;
@@ -21,8 +24,8 @@ export function useThreadLoader({
   relayUrls,
   nostrClient,
   enabled = true,
-  maxFetch = 200,
-  timeBudget = 3000,
+  maxFetch = 120,
+  timeBudget = 1200,
 }: UseThreadLoaderProps) {
   const loaderRef = useRef<{
     abortController: AbortController;
@@ -52,6 +55,12 @@ export function useThreadLoader({
     const controller = loaderRef.current.abortController;
 
     (async () => {
+      const finishThreadMetric = startFeedMetric("thread_load", {
+        rootId: rootId.slice(0, 8),
+        parentId: parentId.slice(0, 8),
+        relays: relayUrls.length,
+      });
+      const queryRelayUrls = relayUrls.slice(0, 8);
       // Avoid loading flicker when cached data exists
       const snapshot = useThreadStore.getState().threads[rootId];
       const hasCachedData = Boolean(
@@ -89,75 +98,75 @@ export function useThreadLoader({
         // Determine which notes still need to be fetched from network
         const uncachedIds = eventIds.filter((id) => !seenIds.has(id));
 
-        // Try to use global Nostrify pool for parallel queries (faster, more reliable)
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const nostrifyPool: any = (globalThis as any).__nostrifyPool;
+        // Prefer Nostrify pool (via shared helper) with multi-relay legacy fallback, then per-relay if needed
         let nostrifyPoolSucceeded = false;
+        let primaryFetchErrored = false;
 
-        if (nostrifyPool) {
-          try {
-            // 1) Fetch the root/parent events by ID using Nostrify pool (parallel across all relays)
-            // Only fetch if we have uncached notes
-            if (uncachedIds.length > 0) {
-              const rootAndParentFilter: any = {
-                kinds: [1],
-                ids: uncachedIds,
-                limit: 10,
-              };
-
-              const rootAndParentEvents: any[] = await Promise.race([
-                nostrifyPool.query([rootAndParentFilter]),
-                new Promise<never>((_, reject) =>
-                  setTimeout(() => reject(new Error("Relay timeout")), timeBudget)
-                ),
-              ]);
-
-              if (Array.isArray(rootAndParentEvents)) {
-                for (const event of rootAndParentEvents) {
-                  if (!seenIds.has(event.id)) {
-                    allEvents.set(event.id, event);
-                    seenIds.add(event.id);
-                  }
-                }
-              }
-            }
-
-            // 2) Fetch replies to root/parent (NIP-10 immediate) using Nostrify pool
-            // Always fetch replies, even if root/parent were cached
-            const replyFilter: any = {
+        try {
+          if (uncachedIds.length > 0) {
+            const rootAndParentFilter: NostrFilter = {
               kinds: [1],
-              "#e": eventIds,
-              limit: maxFetch,
+              ids: uncachedIds,
+              limit: 10,
             };
 
-            const replyEvents: any[] = await Promise.race([
-              nostrifyPool.query([replyFilter]),
+            const rootAndParentEvents: any[] = await Promise.race([
+              queryWithNostrifyPoolFallback([rootAndParentFilter], () =>
+                nostrClient.querySync(queryRelayUrls, rootAndParentFilter as any)
+              ),
               new Promise<never>((_, reject) =>
                 setTimeout(() => reject(new Error("Relay timeout")), timeBudget)
               ),
             ]);
 
-            if (Array.isArray(replyEvents)) {
-              for (const event of replyEvents) {
+            if (Array.isArray(rootAndParentEvents)) {
+              for (const event of rootAndParentEvents) {
                 if (!seenIds.has(event.id)) {
                   allEvents.set(event.id, event);
                   seenIds.add(event.id);
                 }
               }
             }
-
-            nostrifyPoolSucceeded = true;
-          } catch (err) {
-            console.warn("Nostrify pool query error, falling back to sequential relay queries:", err);
-            // Fall through to legacy sequential query approach
           }
+
+          const replyFilter: NostrFilter = {
+            kinds: [1],
+            "#e": eventIds,
+            limit: maxFetch,
+          };
+
+          const replyEvents: any[] = await Promise.race([
+            queryWithNostrifyPoolFallback([replyFilter], () =>
+              nostrClient.querySync(queryRelayUrls, replyFilter as any)
+            ),
+            new Promise<never>((_, reject) =>
+              setTimeout(() => reject(new Error("Relay timeout")), timeBudget)
+            ),
+          ]);
+
+          if (Array.isArray(replyEvents)) {
+            for (const event of replyEvents) {
+              if (!seenIds.has(event.id)) {
+                allEvents.set(event.id, event);
+                seenIds.add(event.id);
+              }
+            }
+          }
+
+          nostrifyPoolSucceeded = true;
+        } catch (err) {
+          primaryFetchErrored = true;
+          console.warn(
+            "Primary thread fetch error, falling back to sequential relay queries:",
+            err
+          );
         }
 
-        // Fallback: Sequential relay queries if Nostrify pool not available or failed
-        // Only needed if we still don't have all root/parent notes, or if Nostrify pool failed
-        const stillNeedRootParent = eventIds.some((id) => !seenIds.has(id));
-        if (!nostrifyPoolSucceeded && (!nostrifyPool || stillNeedRootParent)) {
-          for (const relayUrl of relayUrls) {
+        // Fallback: Sequential relay queries only when primary path errors.
+        // Empty results are treated as valid and should not fan out to every relay.
+        const sequentialRelayUrls = queryRelayUrls.slice(0, 3);
+        if (!nostrifyPoolSucceeded && primaryFetchErrored) {
+          for (const relayUrl of sequentialRelayUrls) {
             if (controller.signal.aborted || !isMounted) break;
 
             // Skip if we already have all the root/parent notes we need
@@ -272,8 +281,17 @@ export function useThreadLoader({
           // For now, assume there may be more (depends on pagination later)
           setHasMore(rootId, false);
         }
+        finishThreadMetric({
+          status: "ok",
+          loadedEvents: allEvents.size,
+          loadedNotes: notes.length,
+        });
       } catch (err) {
         console.error("Thread loader error:", err);
+        finishThreadMetric({
+          status: "error",
+          error: (err as Error)?.message ?? "unknown",
+        });
       } finally {
         if (isMounted) {
           setLoading(rootId, false);

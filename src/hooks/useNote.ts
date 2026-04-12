@@ -4,7 +4,8 @@ import { type Event, type Filter } from 'nostr-tools'
 import { RelayConnectionPool } from '../utils/nostr/relayConnectionPool'
 import type { Note } from '../types/nostr/types'
 import { CACHE_KEYS } from '../utils/cacheKeys'
-import { useRelayConnectionStatus } from './useRelayConnectionStatus'
+import { queryWithNostrifyPoolFallback } from '../utils/nostr/nostrifyPoolQuery'
+import { startFeedMetric } from '../utils/nostr/feedPerformanceMetrics'
 
 interface UseNoteOptions {
   noteId: string
@@ -33,12 +34,16 @@ export function useNote({
 
   const queryClient = useQueryClient();
   const queryKey = CACHE_KEYS.NOTE(noteId)
-  const { hasMinimumConnections } = useRelayConnectionStatus();
 
   const { data: note = null, isLoading, error, refetch } = useQuery({
     queryKey,
     queryFn: async (): Promise<Note | null> => {
+      const finishNoteMetric = startFeedMetric('note_load', {
+        noteId: noteId.slice(0, 8),
+        relays: relayUrls.length,
+      });
       if (!noteId || !relayUrls || relayUrls.length === 0) {
+        finishNoteMetric({ status: 'skipped' });
         return null
       }
 
@@ -46,6 +51,7 @@ export function useNote({
       const cachedNote = queryClient.getQueryData<Note>(queryKey)
       if (cachedNote) {
         console.log(`📋 Using cached note for ${noteId.slice(0, 8)}`)
+        finishNoteMetric({ status: 'cache_hit' });
         return cachedNote
       }
 
@@ -57,36 +63,29 @@ export function useNote({
         limit: 1,
       }
 
-      const augmentedRelays = buildAugmentedRelays(relayUrls, hintTags)
-      // Prefer Nostrify pool when available
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const nostrifyPool: any = (globalThis as any).__nostrifyPool
-      const pool = poolRef.current!
+      const augmentedRelays = buildAugmentedRelays(relayUrls, hintTags).slice(0, 12)
+      const primaryRelayUrls = relayUrls.slice(0, 12)
+      const pool = poolRef.current
+      if (!pool) {
+        throw new Error('Relay pool not initialized')
+      }
 
       try {
         let events: Array<NostrEvent | Event> = []
 
         const queryWithFallback = async (relaysToUse: string[]) => {
-          if (nostrifyPool) {
-            try {
-              return await nostrifyPool.query([filter])
-            } catch (e: any) {
-              if (typeof e?.message === 'string' && e.message.includes('Nostrify pool not ready')) {
-                // Fall back to legacy pool when Nostrify exists but isn't ready yet
-                return await pool.querySync(relaysToUse, filter as unknown as Filter)
-              }
-              throw e
-            }
-          }
-          return await pool.querySync(relaysToUse, filter as unknown as Filter)
+          return queryWithNostrifyPoolFallback<NostrEvent | Event>(
+            [filter],
+            () => pool.querySync(relaysToUse, filter as unknown as Filter)
+          )
         }
 
         events = await queryWithFallback(augmentedRelays)
 
         // If no events found with augmented relays, try with original relays only
-        if (events.length === 0 && augmentedRelays.length !== relayUrls.length) {
+        if (events.length === 0 && augmentedRelays.length !== primaryRelayUrls.length) {
           console.log(`🔄 Retrying note fetch with original relays only`)
-          events = await queryWithFallback(relayUrls)
+          events = await queryWithFallback(primaryRelayUrls)
         }
 
         // If still no events, optionally try with popular relays as fallback
@@ -98,15 +97,14 @@ export function useNote({
           const popularRelays = [
             'wss://nos.lol',
             'wss://relay.snort.social',
-            'wss://nostr.mom',
-            'wss://purplepag.es',
-            'wss://relay.nostr.band'
+            'wss://nostr.mom'
           ]
           events = await queryWithFallback(popularRelays)
         }
 
         if (events.length === 0) {
           console.warn(`❌ Note ${noteId.slice(0, 8)} not found on any relay`)
+          finishNoteMetric({ status: 'empty' });
           return null
         }
 
@@ -123,15 +121,17 @@ export function useNote({
         }
 
         console.log(`✅ Successfully fetched note ${noteId.slice(0, 8)}`)
+        finishNoteMetric({ status: 'ok', eventCount: events.length });
         return mappedNote
       } catch (error) {
         console.error(`❌ Failed to fetch note ${noteId.slice(0, 8)}:`, error)
+        finishNoteMetric({ status: 'error', error: (error as Error)?.message ?? 'unknown' });
         throw error
       }
     },
-    enabled: enabled && !!noteId && relayUrls.length > 0 && hasMinimumConnections,
-    staleTime: 5 * 60 * 1000, // 5 minutes
-    gcTime: 10 * 60 * 1000, // 10 minutes
+    enabled: enabled && !!noteId && relayUrls.length > 0,
+    staleTime: 2 * 60 * 1000, // 2 minutes
+    gcTime: 4 * 60 * 1000, // 4 minutes
     retry: (failureCount) => {
       // Retry up to 2 times for network errors
       if (failureCount < 2) {

@@ -17,7 +17,7 @@
     "test:run:memory": "vitest run --config vitest.config.memory.ts --reporter=verbose",
     "test:coverage": "vitest run --coverage",
     "test:core": "vitest run src/utils/nostr/__tests__/nip07.test.ts src/utils/nostr/__tests__/db.test.ts",
-    "test:critical": "npm run test:core"
+    "test:critical": "bun run test:core"
   },
   "dependencies": {
     "@ibm/plex": "^6.4.1",
@@ -26,8 +26,6 @@
     "@nostr-dev-kit/ndk-wallet": "^0.6.2",
     "@nostrify/nostrify": "npm:@jsr/nostrify__nostrify@^0.46.5",
     "@nostrify/react": "npm:@jsr/nostrify__react@^0.2.9",
-    "@tanstack/query-db-collection": "^0.2.5",
-    "@tanstack/react-db": "^0.1.6",
     "@tanstack/react-query": "^5.85.5",
     "@tanstack/react-query-persist-client": "5.85.5",
     "@tanstack/react-router": "^1.131.48",
@@ -39,7 +37,7 @@
     "framer-motion": "^12.15.0",
     "idb-keyval": "6.2.2",
     "light-bolt11-decoder": "^3.1.0",
-    "nostr-tools": "^2.13.1",
+    "nostr-tools": "^2.23.3",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
     "use-haptic": "^1.1.11",

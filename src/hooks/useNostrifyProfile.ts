@@ -1,6 +1,6 @@
-import { useQuery } from '@tanstack/react-query';
+import { useQuery, useQueries, useQueryClient } from '@tanstack/react-query';
 import { useNostr } from '@nostrify/react';
-import { useCallback } from 'react';
+import { useCallback, useMemo } from 'react';
 import type { NostrEvent } from '@nostrify/nostrify';
 import type { Metadata } from '../types/nostr/types';
 import { acquireQuerySlot, releaseQuerySlot } from '../utils/nostr/queryThrottle';
@@ -197,123 +197,149 @@ export function useNostrifyMultipleProfileMetadata(config: {
   enabled?: boolean;
 }) {
   const { nostr } = useNostr();
+  const queryClient = useQueryClient();
   const { pubkeys, relayUrls, enabled = true } = config;
 
-  const query = useQuery({
-    queryKey: ['nostrify-multiple-profile-metadata', pubkeys, relayUrls],
-    enabled: enabled && pubkeys.length > 0,
-    queryFn: async () => {
-      // Acquire throttle slot for metadata queries
-      const slotId = await acquireQuerySlot('metadata');
-      
-      try {
-        let events: NostrEvent[] = [];
-        if (nostr) {
-          // Add timeout protection (8 seconds for batch metadata)
-          const timeoutMs = 8000;
-          let queryPromise: Promise<NostrEvent[]>;
-          try {
-            queryPromise = nostr.query([{
-              kinds: [0],
-              authors: pubkeys,
-              limit: pubkeys.length
-            }]);
-          } catch {
-            queryPromise = Promise.resolve([] as NostrEvent[]);
-          }
-          const timeoutPromise = new Promise<never>((_, reject) => 
-            setTimeout(() => reject(new Error('Metadata query timeout')), timeoutMs)
-          );
-          // Phase 1: Try with Nostrify pool
-          events = await Promise.race([queryPromise, timeoutPromise]).catch(() => []);
-        }
-        
-        // Phase 2: If no events, use phased fallback from profileMetadataUtils
-        if (events.length === 0) {
-          console.log('📝 Metadata query returned no events, trying phased fallback...');
-          try {
-            const { fetchUserMetadata } = await import('../utils/profileMetadataUtils');
-            
-            // Batch fetch using fetchUserMetadata for each pubkey (with throttling)
-            // Limit to 20 at once to prevent overwhelming relays
-            const pubkeysToFetch = pubkeys.slice(0, 20);
-            const metadataResults = await Promise.all(
-              pubkeysToFetch.map(pk => 
-                fetchUserMetadata({ pubkeyHex: pk, relayUrls })
-              )
-            );
-            
-            // Convert results to events array for consistent processing
-            events = metadataResults
-              .filter(result => result.metadata)
-              .map(result => ({
-                id: `fallback-${result.metadata?.name || 'unknown'}`,
-                pubkey: pubkeysToFetch[metadataResults.indexOf(result)],
-                created_at: Math.floor(Date.now() / 1000),
-                kind: 0,
-                tags: [],
-                sig: '',
-                content: JSON.stringify(result.metadata)
-              })) as NostrEvent[];
-            
-            console.log(`✅ Fallback metadata fetch: ${events.length} results`);
-          } catch (fallbackError) {
-            console.warn('⚠️ Fallback metadata fetch failed:', fallbackError);
-          }
-        }
-        
-        // Group events by author and get the latest for each
-        const metadataMap = new Map<string, Metadata>();
-        
-        events.forEach(event => {
-          try {
-            const parsed = JSON.parse(event.content);
-            if (typeof parsed === 'object' && parsed !== null) {
-              const metadata: Metadata = {
-                name: parsed.name || '',
-                about: parsed.about || '',
-                picture: parsed.picture || '',
-                banner: parsed.banner || '',
-                nip05: parsed.nip05 || '',
-                lud06: parsed.lud06 || '',
-                lud16: parsed.lud16 || '',
-                website: parsed.website || '',
-                display_name: parsed.display_name || parsed.name || ''
-              };
-              
-              // Only update if this is newer than what we have
-              const existing = metadataMap.get(event.pubkey);
-              if (!existing) {
-                metadataMap.set(event.pubkey, metadata);
-              }
+  const uniquePubkeys = useMemo(
+    () => Array.from(new Set((pubkeys || []).filter(Boolean))),
+    [pubkeys]
+  );
+
+  const parseMetadataFromEvent = useCallback((event: NostrEvent): Metadata | null => {
+    try {
+      if (!event.content) return null;
+      const parsed = JSON.parse(event.content);
+      if (typeof parsed !== 'object' || parsed === null) return null;
+      return {
+        name: parsed.name || '',
+        about: parsed.about || '',
+        picture: parsed.picture || '',
+        banner: parsed.banner || '',
+        nip05: parsed.nip05 || '',
+        lud06: parsed.lud06 || '',
+        lud16: parsed.lud16 || '',
+        website: parsed.website || '',
+        display_name: parsed.display_name || parsed.name || ''
+      };
+    } catch {
+      return null;
+    }
+  }, []);
+
+  const profileQueries = useQueries({
+    queries: uniquePubkeys.map((pubkeyHex) => ({
+      queryKey: ['nostrify-profile-metadata', pubkeyHex, relayUrls] as const,
+      enabled: enabled && uniquePubkeys.length > 0 && relayUrls.length > 0,
+      staleTime: 5 * 60 * 1000,
+      gcTime: 30 * 60 * 1000,
+      refetchOnWindowFocus: false,
+      retry: (failureCount: number, error: Error) => {
+        if (error?.message?.includes('timeout')) return false;
+        return failureCount < 2;
+      },
+      retryDelay: (attemptIndex: number) =>
+        Math.min(1000 * Math.pow(2, attemptIndex), 3000),
+      queryFn: async (): Promise<Metadata | null> => {
+        const slotId = await acquireQuerySlot('metadata');
+        try {
+          let events: NostrEvent[] = [];
+          if (nostr) {
+            const timeoutMs = 8000;
+            let queryPromise: Promise<NostrEvent[]>;
+            try {
+              queryPromise = nostr.query([
+                { kinds: [0], authors: [pubkeyHex], limit: 1 }
+              ]);
+            } catch {
+              queryPromise = Promise.resolve([] as NostrEvent[]);
             }
-          } catch (error) {
-            console.warn('Failed to parse metadata for', event.pubkey, error);
+            const timeoutPromise = new Promise<never>((_, reject) =>
+              setTimeout(() => reject(new Error('Metadata query timeout')), timeoutMs)
+            );
+            events = await Promise.race([queryPromise, timeoutPromise]).catch(() => []);
           }
-        });
-        
-        return metadataMap;
-      } finally {
-        // Always release the throttle slot
-        releaseQuerySlot(slotId);
-      }
-    },
-    staleTime: 5 * 60 * 1000, // 5 minutes
-    gcTime: 30 * 60 * 1000, // 30 minutes
-    refetchOnWindowFocus: false,
-    retry: (failureCount, error) => {
-      // Don't retry timeouts - use fallback instead
-      if (error.message.includes('timeout')) return false;
-      return failureCount < 2;
-    },
-    retryDelay: (attemptIndex) => Math.min(1000 * Math.pow(2, attemptIndex), 3000),
+
+          if (events.length === 0) {
+            if (import.meta.env.DEV) {
+              console.log('📝 Metadata query returned no events, trying phased fallback...');
+            }
+            try {
+              const { fetchUserMetadata } = await import('../utils/profileMetadataUtils');
+              const result = await fetchUserMetadata({
+                pubkeyHex,
+                relayUrls,
+                useOutboxRelays: true
+              });
+              if (result?.metadata) {
+                events = [
+                  {
+                    id: 'fallback',
+                    pubkey: pubkeyHex,
+                    created_at: Math.floor(Date.now() / 1000),
+                    kind: 0,
+                    tags: [],
+                    sig: '',
+                    content: JSON.stringify(result.metadata)
+                  } as NostrEvent
+                ];
+              }
+            } catch (fallbackError) {
+              console.warn('⚠️ Fallback metadata fetch failed:', fallbackError);
+            }
+          }
+
+          if (events.length === 0) return null;
+          const latestEvent = events.sort((a, b) => b.created_at - a.created_at)[0];
+          return parseMetadataFromEvent(latestEvent);
+        } finally {
+          releaseQuerySlot(slotId);
+        }
+      },
+    })),
   });
 
+  const profileQueriesDigest = useMemo(
+    () =>
+      uniquePubkeys
+        .map((pk, i) => {
+          const q = profileQueries[i];
+          const h = q?.dataUpdatedAt ?? 0;
+          const d = q?.data ? '1' : '0';
+          return `${pk}:${h}:${d}`;
+        })
+        .join(','),
+    [uniquePubkeys, profileQueries]
+  );
+
+  const metadataMap = useMemo(() => {
+    const m = new Map<string, Metadata>();
+    uniquePubkeys.forEach((pk, i) => {
+      const data = profileQueries[i]?.data;
+      if (data) m.set(pk, data);
+    });
+    return m;
+    // profileQueries read via digest to avoid a new Map every render
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [uniquePubkeys, profileQueriesDigest]);
+
+  const isLoading = profileQueries.some((q) => q.isPending && !q.data);
+  const firstError = profileQueries.find((q) => q.error)?.error ?? null;
+
+  const refetch = useCallback(() => {
+    return Promise.all(
+      uniquePubkeys.map((pk) =>
+        queryClient.refetchQueries({
+          queryKey: ['nostrify-profile-metadata', pk],
+        })
+      )
+    );
+  }, [queryClient, uniquePubkeys]);
+
   return {
-    metadataMap: query.data || new Map(),
-    isLoading: query.isLoading,
-    error: query.error,
-    refetch: query.refetch
+    metadataMap,
+    isLoading,
+    error: firstError,
+    refetch
   };
 }
 

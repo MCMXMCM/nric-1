@@ -183,7 +183,9 @@ export const NostrifyMigrationProvider: React.FC<
         // Recreate pool when relay configuration changes
         pool.current = new NPool({
           open(url: string) {
-            console.log("🔌 Opening relay connection:", url);
+            if (import.meta.env.DEV) {
+              console.log("🔌 Opening relay connection:", url);
+            }
             return new NRelay1(url);
           },
           reqRouter: async (filters: NostrFilter[]) => {
@@ -532,9 +534,6 @@ export const NostrifyMigrationProvider: React.FC<
             const currentVersion = poolVersion;
             // Capture cancel token to detect resets across stale closures
             const currentTokenAtStart = cancelTokenRef.current;
-            if (!poolReady) {
-              throw new Error("Nostrify pool not ready");
-            }
             try {
               const result = await g.__nostrifyQuerySemaphore.acquire(() =>
                 pool.current!.query(filters)

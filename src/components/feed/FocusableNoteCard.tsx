@@ -59,7 +59,7 @@ export const FocusableNoteCard: React.FC<FocusableNoteCardProps> = ({
         <NoteCard
           note={note}
           index={index}
-          metadata={metadata}
+          authorMetadata={metadata?.[note.pubkey] ?? null}
           asciiCache={asciiCache}
           isDarkMode={isDarkMode}
           useAscii={useAscii}

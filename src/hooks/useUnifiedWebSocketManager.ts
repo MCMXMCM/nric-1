@@ -218,9 +218,8 @@ export class UnifiedWebSocketManager {
         const firstPage = oldData.pages[0];
         if (!firstPage) return oldData;
 
-        // Check for duplicates
-        const noteExists = firstPage.notes.some(note => note.id === newNote.id);
-        if (noteExists) return oldData;
+        const firstPageIds = new Set(firstPage.notes.map((n) => n.id));
+        if (firstPageIds.has(newNote.id)) return oldData;
 
         return {
           ...oldData,
@@ -358,6 +357,28 @@ export const destroyGlobalUnifiedWebSocketManager = (): void => {
   }
 };
 
+/** Deterministic JSON for subscription dependency comparisons (reduces unnecessary resubscribes). */
+function stableStringify(value: unknown): string {
+  const seen = new WeakSet<object>();
+  const normalize = (v: unknown): unknown => {
+    if (v === null || typeof v !== 'object') return v;
+    if (seen.has(v as object)) return '[Circular]';
+    if (Array.isArray(v)) return v.map(normalize);
+    seen.add(v as object);
+    const obj = v as Record<string, unknown>;
+    const out: Record<string, unknown> = {};
+    for (const k of Object.keys(obj).sort()) {
+      out[k] = normalize(obj[k]);
+    }
+    return out;
+  };
+  try {
+    return JSON.stringify(normalize(value));
+  } catch {
+    return String(value);
+  }
+}
+
 /**
  * React hook for unified WebSocket management
  * Uses a global instance to prevent destruction during component unmounts
@@ -387,22 +408,37 @@ export function useRealtimeSubscription(
   reconnectAttempts: number;
 } {
   const manager = useUnifiedWebSocketManager();
-  const subscriptionId = subscription.id || `subscription-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+  const generatedIdRef = useRef<string>(
+    `subscription-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`
+  );
+  const subscriptionId = subscription.id || generatedIdRef.current;
   
   const isConnectedRef = useRef(false);
   const reconnectAttemptsRef = useRef(0);
+  const subscriptionRef = useRef(subscription);
+  subscriptionRef.current = subscription;
+
+  const relayUrlsKey = useMemo(
+    () => stableStringify(subscription.relayUrls),
+    [subscription.relayUrls]
+  );
+  const filterKey = useMemo(
+    () => stableStringify(subscription.filter),
+    [subscription.filter]
+  );
 
   // Set up subscription
   useEffect(() => {
+    const sub = subscriptionRef.current;
     const fullSubscription: WebSocketSubscription = {
-      ...subscription,
+      ...sub,
       id: subscriptionId,
     };
 
     const unsubscribe = manager.subscribe(fullSubscription);
     
     return unsubscribe;
-  }, [manager, subscriptionId, subscription.enabled, JSON.stringify(subscription.relayUrls), JSON.stringify(subscription.filter)]);
+  }, [manager, subscriptionId, subscription.enabled, relayUrlsKey, filterKey]);
 
   return {
     isConnected: isConnectedRef.current,

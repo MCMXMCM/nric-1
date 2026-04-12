@@ -48,6 +48,7 @@ import { VirtualizedFeed } from "./feed/VirtualizedFeed";
 
 // Bookmark hook
 import { useBookmarks } from "../hooks/useBookmarks";
+import { addAsciiCacheEntry } from "../utils/asciiCache";
 
 // Styles
 import "./NostrFeed.css";
@@ -121,6 +122,13 @@ const NostrifyFeedMigration: React.FC = () => {
   const params = useParams({ strict: false }) as { noteId?: string };
   // Hold a live reference to the virtualizer instance so hotkeys can scroll reliably
   const [virtualizer, setVirtualizer] = useState<any>(null);
+  /** Center of visible feed window — drives prefetch so work tracks the viewport, not the top of the list. */
+  const [feedPrefetchAnchorIndex, setFeedPrefetchAnchorIndex] = useState(0);
+  /** Visible row range for author metadata — avoids fetching metadata for every author in the full feed. */
+  const [feedVisibleAuthorRange, setFeedVisibleAuthorRange] = useState<{
+    startIndex: number;
+    endIndex: number;
+  } | null>(null);
 
   // Parse modal state from URL for thread modal awareness
   const modalState = useMemo(() => {
@@ -466,22 +474,28 @@ const NostrifyFeedMigration: React.FC = () => {
 
       // If we have contacts, enable feed
       if (contactsLen > 0) {
-        console.log("✅ Contacts loaded, enabling feed", { contactsLen });
+        if (import.meta.env.DEV) {
+          console.log("✅ Contacts loaded, enabling feed", { contactsLen });
+        }
         return true;
       }
 
       // If contacts are currently loading and we have none yet, hold off
       if (contactsLoading) {
-        console.log("⏳ Waiting for contacts to load...");
+        if (import.meta.env.DEV) {
+          console.log("⏳ Waiting for contacts to load...");
+        }
         return false;
       }
 
       // If contacts finished loading but we have none, don't enable feed yet
       // The user might not have any contacts, or they're still loading
       if (contactsLen === 0 && !contactsLoading) {
-        console.log(
-          "⚠️ No contacts available. Following feed cannot be used without contacts."
-        );
+        if (import.meta.env.DEV) {
+          console.log(
+            "⚠️ No contacts available. Following feed cannot be used without contacts."
+          );
+        }
         return false;
       }
     }
@@ -496,17 +510,18 @@ const NostrifyFeedMigration: React.FC = () => {
     normalizeContactsToPubkeys,
   ]);
 
-  // Debug feed configuration
-  console.log("🔧 Feed configuration:", {
-    isFollowingMode,
-    shouldEnableFeed,
-    contactsLoading,
-    contactsCount: userContacts?.length || 0,
-    relayUrlsCount: nostrifyRelayUrls.length,
-    relayUrls: nostrifyRelayUrls.slice(0, 3), // Show first 3 relays for debugging
-    feedFilter,
-    uiLongFormMode,
-  });
+  if (import.meta.env.DEV) {
+    console.log("🔧 Feed configuration:", {
+      isFollowingMode,
+      shouldEnableFeed,
+      contactsLoading,
+      contactsCount: userContacts?.length || 0,
+      relayUrlsCount: nostrifyRelayUrls.length,
+      relayUrls: nostrifyRelayUrls.slice(0, 3),
+      feedFilter,
+      uiLongFormMode,
+    });
+  }
 
   // Use Nostrify feed hook for data fetching with the current Nostrify pool configuration
   const {
@@ -530,9 +545,7 @@ const NostrifyFeedMigration: React.FC = () => {
     enabled: shouldEnableFeed,
     // Unified page size across devices
     pageSize: isFollowingMode ? 30 : 20,
-    // Let TanStack Virtual handle memory management - it only renders visible items
-    // Manual page pruning causes jittering when pages get removed from the data array
-    maxPagesInMemory: undefined, // No limit - Virtual handles this efficiently
+    maxPagesInMemory: 50,
     showReplies: uiShowReplies,
     showReposts: uiShowReposts,
     nsfwBlock: uiNsfwBlock,
@@ -540,14 +553,15 @@ const NostrifyFeedMigration: React.FC = () => {
     customHashtags: uiCustomHashtags,
   });
 
-  // Debug notes being returned
-  console.log("📝 Feed notes debug:", {
-    notesCount: notes.length,
-    noteKinds: notes
-      .slice(0, 5)
-      .map((note) => ({ id: note.id.slice(0, 8), kind: note.kind })), // Show first 5 note kinds
-    uiLongFormMode,
-  });
+  if (import.meta.env.DEV) {
+    console.log("📝 Feed notes debug:", {
+      notesCount: notes.length,
+      noteKinds: notes
+        .slice(0, 5)
+        .map((note) => ({ id: note.id.slice(0, 8), kind: note.kind })),
+      uiLongFormMode,
+    });
+  }
 
   // Removed iOS Safari-specific soft-timeout banner — unified behavior across devices
 
@@ -625,13 +639,15 @@ const NostrifyFeedMigration: React.FC = () => {
   const handleRelaySelectionChange = useCallback(
     (newSelectedRelay: string) => {
       const isNewFollowing = newSelectedRelay === FOLLOWING_RELAY_OPTION;
-      console.log("🔄 Relay selection changed:", {
-        previous: selectedRelay,
-        new: newSelectedRelay,
-        mode: isNewFollowing
-          ? "Following (uses regular relays)"
-          : "Single Relay",
-      });
+      if (import.meta.env.DEV) {
+        console.log("🔄 Relay selection changed:", {
+          previous: selectedRelay,
+          new: newSelectedRelay,
+          mode: isNewFollowing
+            ? "Following (uses regular relays)"
+            : "Single Relay",
+        });
+      }
 
       setSelectedRelay(newSelectedRelay);
       // Keep global UI filter in sync with relay selection
@@ -666,10 +682,12 @@ const NostrifyFeedMigration: React.FC = () => {
       !prevRelays.every((url, index) => url === currentRelays[index]);
 
     if (relaysChanged && prevRelays.length > 0) {
-      console.log("🔄 Relay configuration changed, refreshing feed:", {
-        prev: prevRelays,
-        current: currentRelays,
-      });
+      if (import.meta.env.DEV) {
+        console.log("🔄 Relay configuration changed, refreshing feed:", {
+          prev: prevRelays,
+          current: currentRelays,
+        });
+      }
       // Force a refresh when relays change
       setTimeout(() => refresh(), 100);
     }
@@ -683,7 +701,9 @@ const NostrifyFeedMigration: React.FC = () => {
     const urlHashtags = parseHashtagParams(searchParams);
 
     if (urlHashtags.length > 0) {
-      console.log("🏷️ Loading hashtag filters from URL:", urlHashtags);
+      if (import.meta.env.DEV) {
+        console.log("🏷️ Loading hashtag filters from URL:", urlHashtags);
+      }
       setCustomHashtags(urlHashtags);
     }
   }, [location.search, setCustomHashtags]);
@@ -696,7 +716,9 @@ const NostrifyFeedMigration: React.FC = () => {
         window.location.href
       );
       if (newUrl !== window.location.href) {
-        console.log("🏷️ Updating URL with hashtag filters:", uiCustomHashtags);
+        if (import.meta.env.DEV) {
+          console.log("🏷️ Updating URL with hashtag filters:", uiCustomHashtags);
+        }
         window.history.replaceState({}, "", newUrl);
       }
     } else {
@@ -705,7 +727,9 @@ const NostrifyFeedMigration: React.FC = () => {
       if (url.searchParams.has("hashtag")) {
         url.searchParams.delete("hashtag");
         const newUrl = url.toString();
-        console.log("🏷️ Removing hashtag parameters from URL");
+        if (import.meta.env.DEV) {
+          console.log("🏷️ Removing hashtag parameters from URL");
+        }
         window.history.replaceState({}, "", newUrl);
       }
     }
@@ -732,16 +756,63 @@ const NostrifyFeedMigration: React.FC = () => {
     nostrifyRelayUrls.length,
   ]);
 
-  // Fetch metadata for all note authors
-  // IMPORTANT: Only enable metadata fetching AFTER the initial feed query completes SUCCESSFULLY
-  // This prevents metadata queries from competing with the feed query for relay connections
-  const uniqueAuthors = useMemo(() => {
-    const authors = new Set<string>();
-    notes.forEach((note) => {
-      if (note.pubkey) authors.add(note.pubkey);
+  const prevFeedLoadingRef = useRef(isLoading);
+
+  // Seed visible range before the virtualizer reports (first paint / short feeds)
+  useEffect(() => {
+    if (notes.length === 0) {
+      setFeedVisibleAuthorRange(null);
+      return;
+    }
+    // New feed load / refresh: clear range so we re-seed from the top
+    if (isLoading && !prevFeedLoadingRef.current) {
+      setFeedVisibleAuthorRange(null);
+    }
+    prevFeedLoadingRef.current = isLoading;
+
+    setFeedVisibleAuthorRange((prev) => {
+      if (prev) return prev;
+      return {
+        startIndex: 0,
+        endIndex: Math.min(19, notes.length - 1),
+      };
     });
+  }, [notes.length, isLoading]);
+
+  // Let query throttle cap metadata concurrency while pagination is in flight
+  useEffect(() => {
+    try {
+      (globalThis as any).__feedPaginationActive = !!isFetchingNextPage;
+    } catch {
+      /* ignore */
+    }
+    return () => {
+      try {
+        (globalThis as any).__feedPaginationActive = false;
+      } catch {
+        /* ignore */
+      }
+    };
+  }, [isFetchingNextPage]);
+
+  // Authors in the visible window (+ padding) for metadata — not the entire feed
+  const visibleFeedAuthors = useMemo(() => {
+    if (notes.length === 0) return [];
+    const pad = 6;
+    const range = feedVisibleAuthorRange;
+    const start = range
+      ? Math.max(0, range.startIndex - pad)
+      : 0;
+    const end = range
+      ? Math.min(notes.length - 1, range.endIndex + pad)
+      : Math.min(notes.length - 1, 24);
+    const authors = new Set<string>();
+    for (let i = start; i <= end; i++) {
+      const pk = notes[i]?.pubkey;
+      if (pk) authors.add(pk);
+    }
     return Array.from(authors);
-  }, [notes]);
+  }, [notes, feedVisibleAuthorRange]);
 
   // Defer metadata fetching until:
   // 1. Feed query is not loading
@@ -753,7 +824,7 @@ const NostrifyFeedMigration: React.FC = () => {
 
   const { metadataMap, isLoading: isLoadingMetadata } =
     useNostrifyMultipleProfileMetadata({
-      pubkeys: uniqueAuthors,
+      pubkeys: visibleFeedAuthors,
       relayUrls: readRelays,
       enabled: shouldFetchMetadata, // Only fetch after feed query succeeds
     });
@@ -762,103 +833,41 @@ const NostrifyFeedMigration: React.FC = () => {
   if (isLoadingMetadata && import.meta.env.DEV) {
     console.log(
       "📝 Loading metadata for",
-      uniqueAuthors.length,
-      "authors (after feed query completed)"
+      visibleFeedAuthors.length,
+      "visible-window authors (after feed query completed)"
     );
   }
-
-  // Convert Map to plain object for VirtualizedFeed
-  const metadataRecord = useMemo(() => {
-    const obj: Record<string, any> = {};
-    metadataMap.forEach((value, key) => {
-      obj[key] = value as any;
-    });
-    return obj;
-  }, [metadataMap]);
 
   // Note: Real-time updates are handled by the feed query system
   // No need for separate realtime subscription here
 
+  const handleFeedVisibleRangeChange = useCallback(
+    (range: { startIndex: number; endIndex: number; centerIndex: number }) => {
+      setFeedPrefetchAnchorIndex((prev) =>
+        prev === range.centerIndex ? prev : range.centerIndex
+      );
+      setFeedVisibleAuthorRange({
+        startIndex: range.startIndex,
+        endIndex: range.endIndex,
+      });
+    },
+    []
+  );
+
+  const feedScrollActivityRef = useRef<{ active: boolean } | null>({ active: false });
+
   // Enhanced prefetching for images, metadata, threads, reactions, and parent notes
   useEnhancedPrefetch({
     notes,
-    currentIndex: 0,
+    currentIndex: feedPrefetchAnchorIndex,
     relayUrls: readRelays,
     enabled: true,
     prefetchWindow: 10,
     nostrClient: legacyContext?.nostrClient,
     myPubkey: legacyContext?.pk,
+    scrollActivityRef: feedScrollActivityRef,
+    isFetchingNextPage,
   });
-
-  // Bottom sentinel + observer for IntersectionObserver-based infinite scroll
-  const bottomSentinelRef = useRef<HTMLDivElement | null>(null);
-  const observerRef = useRef<IntersectionObserver | null>(null);
-  const lastManualTriggerRef = useRef(0);
-
-  const setBottomSentinel = useCallback(
-    (node: HTMLDivElement | null) => {
-      bottomSentinelRef.current = node;
-      // Disconnect any previous observer
-      if (observerRef.current) {
-        observerRef.current.disconnect();
-        observerRef.current = null;
-      }
-      const root = parentRef.current;
-      if (!node || !root) return;
-
-      const observer = new IntersectionObserver(
-        (entries) => {
-          for (const entry of entries) {
-            if (entry.isIntersecting) {
-              if (hasNextPage && !isFetchingNextPage) {
-                // Add debouncing to prevent rapid pagination
-                const now = Date.now();
-                if (now - lastManualTriggerRef.current > 1000) {
-                  // 1 second debounce
-                  lastManualTriggerRef.current = now;
-                  console.log("📄 Loading next page...");
-                  fetchNextPage();
-                }
-              }
-            }
-          }
-        },
-        {
-          root,
-          rootMargin: "200px",
-          threshold: 0.01,
-        }
-      );
-
-      observer.observe(node);
-      observerRef.current = observer;
-    },
-    [hasNextPage, isFetchingNextPage, fetchNextPage]
-  );
-
-  // Note: IntersectionObserver will also trigger when content does not fill viewport
-
-  // Removed duplicate IntersectionObserver - using only the one in setBottomSentinel
-
-  // Reattach observer on route changes to ensure intersection events resume
-  useEffect(() => {
-    const node = bottomSentinelRef.current;
-    if (node) setBottomSentinel(node);
-  }, [location.pathname, location.search, setBottomSentinel]);
-
-  // Removed redundant scroll handler - using only IntersectionObserver for pagination
-
-  // Removed automatic scroll to top on hashtag changes to prevent unwanted jumping
-
-  // IntersectionObserver to trigger fetching next page
-  useEffect(() => {
-    return () => {
-      if (observerRef.current) {
-        observerRef.current.disconnect();
-        observerRef.current = null;
-      }
-    };
-  }, []);
 
   // Pull to refresh
   const pullToRefresh = usePullToRefresh({
@@ -1158,10 +1167,7 @@ const NostrifyFeedMigration: React.FC = () => {
 
   // Handle ASCII rendering
   const handleAsciiRendered = (noteId: string, ascii: string) => {
-    state.setAsciiCache((prev) => ({
-      ...prev,
-      [noteId]: { ascii, timestamp: Date.now() },
-    }));
+    state.setAsciiCache((prev) => addAsciiCacheEntry(prev, noteId, ascii));
   };
 
   // Track failed media loads to prevent repeated attempts
@@ -1623,7 +1629,7 @@ const NostrifyFeedMigration: React.FC = () => {
                 width: "100%",
                 flex: 1,
                 minHeight: 0,
-                overflow: "auto",
+                overflow: "hidden",
                 display: "flex",
                 flexDirection: "column",
                 WebkitOverflowScrolling: "touch",
@@ -1632,7 +1638,9 @@ const NostrifyFeedMigration: React.FC = () => {
               <FeedContentWithConditionalPadding isMobile={state.isMobile}>
                 <VirtualizedFeed
                   notes={notes}
-                  metadata={metadataRecord}
+                  onVisibleRangeChange={handleFeedVisibleRangeChange}
+                  metadata={metadataMap}
+                  feedScrollActivityRef={feedScrollActivityRef}
                   asciiCache={state.asciiCache}
                   setAsciiCache={state.setAsciiCache}
                   isDarkMode={uiIsDarkMode}

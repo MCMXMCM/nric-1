@@ -24,6 +24,7 @@ import { useThreadStore } from "../state/threadStore";
 import { useThreadLoader } from "../hooks/useThreadLoader";
 import { useScrollRestoration } from "../hooks/useScrollRestoration";
 import { prefetchThread } from "../utils/thread/prefetch";
+import { addAsciiCacheEntry } from "../utils/asciiCache";
 
 const ThreadPage: React.FC = () => {
   const { noteId } = useParams({ strict: false }) as { noteId: string };
@@ -194,10 +195,7 @@ const ThreadPage: React.FC = () => {
   >({});
 
   const handleAsciiRendered = useCallback((url: string, ascii: string) => {
-    setAsciiCache((prev) => ({
-      ...prev,
-      [url]: { ascii, timestamp: Date.now() },
-    }));
+    setAsciiCache((prev) => addAsciiCacheEntry(prev, url, ascii));
   }, []);
 
   const handleMediaLoadError = useCallback((url: string) => {

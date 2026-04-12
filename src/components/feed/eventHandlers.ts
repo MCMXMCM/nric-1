@@ -1,5 +1,6 @@
 // Event handlers and utility functions for NostrFeed
 import React from 'react';
+import { addAsciiCacheEntry } from '../../utils/asciiCache';
 
 export const createHashtagClickHandler = (
   getCustomHashtags: () => string[],
@@ -146,10 +147,7 @@ export const createAsciiRenderedHandler = (
   }
   
   // Only cache actual ASCII content
-  setAsciiCache((prev: any) => ({
-    ...prev,
-    [url]: { ascii, timestamp: Date.now() }
-  }));
+  setAsciiCache((prev: any) => addAsciiCacheEntry(prev, url, ascii));
 };
 
 export const createRemoveStoredPubkeyHandler = (

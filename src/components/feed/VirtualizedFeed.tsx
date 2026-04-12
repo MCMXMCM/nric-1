@@ -1,6 +1,7 @@
 import React, {
   useRef,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useCallback,
   useState,
@@ -22,8 +23,21 @@ import { useNoteDynamicHeight } from "../../hooks/useNoteDynamicHeight";
 import { usePullToRefresh } from "../../hooks/usePullToRefresh";
 import { PullToRefreshIndicator } from "../ui/PullToRefreshIndicator";
 import type { Note, Metadata } from "../../types/nostr/types";
+
+function getMetadataForPubkey(
+  metadata: Map<string, Metadata> | Record<string, Metadata> | undefined,
+  pubkey: string
+): Metadata | null {
+  if (!metadata) return null;
+  if (metadata instanceof Map) {
+    return metadata.get(pubkey) ?? null;
+  }
+  return metadata[pubkey] ?? null;
+}
 import { useRouterAwareScrollRestoration } from "../../hooks/useRouterAwareScrollRestoration";
 import { usePersistentImageCache } from "../../hooks/usePersistentImageCache";
+import { recordFeedMetric, startFeedMetric } from "../../utils/nostr/feedPerformanceMetrics";
+import { addAsciiCacheEntry } from "../../utils/asciiCache";
 
 // Shared ResizeObserver context for feed items
 const SharedResizeObserverContext = React.createContext<ResizeObserver | null>(null);
@@ -46,6 +60,7 @@ interface VirtualizedNoteItemProps {
 const VirtualizedNoteItem: React.FC<VirtualizedNoteItemProps> = ({
   virtualItem,
   virtualizer,
+  isMobile: isMobileItem,
   children,
   noteId,
   storageKey,
@@ -54,6 +69,8 @@ const VirtualizedNoteItem: React.FC<VirtualizedNoteItemProps> = ({
   const itemRef = useRef<HTMLDivElement>(null);
   const lastMeasuredHeight = useRef<number>(0);
   const sharedObserver = React.useContext(SharedResizeObserverContext);
+  const measurementTimeoutRef = useRef<number | null>(null);
+  const measurementRafRef = useRef<number | null>(null);
 
   useEffect(() => {
     if (!itemRef.current) return;
@@ -76,7 +93,8 @@ const VirtualizedNoteItem: React.FC<VirtualizedNoteItemProps> = ({
 
         // More conservative threshold for image-related height changes
         const delta = Math.abs(newHeight - lastMeasuredHeight.current);
-        const isSignificantChange = delta > 5; // Reduced threshold for better responsiveness
+        const minDelta = isMobileItem ? 8 : 12;
+        const isSignificantChange = delta > minDelta;
 
         if (isSignificantChange) {
           lastMeasuredHeight.current = newHeight;
@@ -90,11 +108,18 @@ const VirtualizedNoteItem: React.FC<VirtualizedNoteItemProps> = ({
             Array.from(el.querySelectorAll("img")).some((img) => !img.complete);
 
           // ✅ Enhanced debounced remeasurement with scroll position preservation
-          setTimeout(
+          if (measurementTimeoutRef.current != null) {
+            clearTimeout(measurementTimeoutRef.current);
+            measurementTimeoutRef.current = null;
+          }
+          measurementTimeoutRef.current = window.setTimeout(
             () => {
               const stabilizer = getGlobalScrollStabilizer();
               if (!stabilizer.isStabilizing() && itemRef.current) {
-                requestAnimationFrame(() => {
+                if (measurementRafRef.current != null) {
+                  cancelAnimationFrame(measurementRafRef.current);
+                }
+                measurementRafRef.current = requestAnimationFrame(() => {
                   const el = itemRef.current;
                   if (el) {
                     // For image loading events, use more conservative scroll adjustment
@@ -134,6 +159,14 @@ const VirtualizedNoteItem: React.FC<VirtualizedNoteItemProps> = ({
     resizeObserver.observe(itemRef.current);
 
     return () => {
+      if (measurementTimeoutRef.current != null) {
+        clearTimeout(measurementTimeoutRef.current);
+        measurementTimeoutRef.current = null;
+      }
+      if (measurementRafRef.current != null) {
+        cancelAnimationFrame(measurementRafRef.current);
+        measurementRafRef.current = null;
+      }
       // Only disconnect if we created our own observer (not shared)
       if (!sharedObserver) {
         resizeObserver.disconnect();
@@ -144,7 +177,7 @@ const VirtualizedNoteItem: React.FC<VirtualizedNoteItemProps> = ({
         }
       }
     };
-  }, [virtualizer, noteId, recordActualHeight, storageKey, sharedObserver]);
+  }, [virtualizer, noteId, recordActualHeight, storageKey, sharedObserver, virtualItem.index, isMobileItem]);
 
   return (
     <div
@@ -173,7 +206,8 @@ const VirtualizedNoteItem: React.FC<VirtualizedNoteItemProps> = ({
 
 interface VirtualizedFeedProps {
   notes: Note[];
-  metadata: Record<string, Metadata>;
+  /** Author metadata keyed by pubkey (Map avoids rebuilding a plain object each update). */
+  metadata?: Map<string, Metadata> | Record<string, Metadata>;
   asciiCache: Record<string, { ascii: string; timestamp: number }>;
   isDarkMode: boolean;
   useAscii: boolean;
@@ -215,6 +249,14 @@ interface VirtualizedFeedProps {
   debug?: boolean;
   // Notify parent with the virtualizer instance so hotkeys can scroll the correct container
   onVirtualizerReady?: (v: Virtualizer<HTMLDivElement, Element>) => void;
+  /** Report visible row range for viewport-driven prefetch (main feed). */
+  onVisibleRangeChange?: (range: {
+    startIndex: number;
+    endIndex: number;
+    centerIndex: number;
+  }) => void;
+  /** Set while the feed scroll container is actively scrolling (debounced). */
+  feedScrollActivityRef?: React.MutableRefObject<{ active: boolean } | null>;
 }
 
 export const VirtualizedFeed: React.FC<VirtualizedFeedProps> = ({
@@ -251,19 +293,32 @@ export const VirtualizedFeed: React.FC<VirtualizedFeedProps> = ({
   useSimpleScrollRestoration,
   debug,
   onVirtualizerReady,
+  onVisibleRangeChange,
+  feedScrollActivityRef,
 }) => {
   const parentRef = useRef<HTMLDivElement>(null);
   const location = useLocation();
   const isRestoringRef = useRef(false);
+  const restoreCompleteTimerRef = useRef<number | null>(null);
   const [restoreGeneration, setRestoreGeneration] = useState(0);
 
   // Note: Keyboard navigation spacing is now handled in FeedWithHotkeys via scroll adjustment
   // Track the last index that triggered a fetch to avoid duplicate triggers
   const lastFetchIndexRef = useRef<number>(-1);
+  const visibleRangeRafRef = useRef<number | null>(null);
+  const lastReportedVisibleRef = useRef<{
+    center: number;
+    start: number;
+    end: number;
+    at: number;
+  } | null>(null);
+  const pendingResizeMeasureIndicesRef = useRef<Set<string>>(new Set());
+  const sharedResizeMeasureRafRef = useRef<number | null>(null);
   // Limit prefetch attempts when content is not scrollable
   const noScrollPrefetchCountRef = useRef<number>(0);
-  // Track if we've done initial setup to allow first automatic fetch
+  // Allow infinite scroll after first layout (avoid fixed 500ms delay)
   const hasInitializedRef = useRef(false);
+  const prevIsFetchingNextPageRef = useRef(isFetchingNextPage);
 
   // Track media query changes for responsive height estimation
   const [windowWidth, setWindowWidth] = React.useState(() =>
@@ -271,22 +326,39 @@ export const VirtualizedFeed: React.FC<VirtualizedFeedProps> = ({
   );
 
   // Optional: only use non-position caches (image/ascii). Avoid initial offset/measurements to reduce conflicts with router-aware restoration
+  const notesSignature = useMemo(() => {
+    if (notes.length === 0) return "0";
+    const first = notes[0]?.id ?? "";
+    const last = notes[notes.length - 1]?.id ?? "";
+    return `${notes.length}:${first}:${last}`;
+  }, [notes]);
+
+  const latestNotesRef = useRef(notes);
+  latestNotesRef.current = notes;
+
   const initialScrollState = useMemo(() => {
-    return getInitialVirtualScrollState(storageKey, location.pathname, {
+    const cachedState = getInitialVirtualScrollState(storageKey, location.pathname, {
       maxAge: 30 * 60 * 1000,
       minItemCount: 5,
-      currentNotes: notes,
+      currentNotes: latestNotesRef.current,
     });
-  }, [location.pathname, notes, storageKey]);
+    if (!cachedState) return null;
+    if (useSimpleScrollRestoration) return cachedState;
+    return {
+      ...cachedState,
+      initialOffset: undefined,
+      initialMeasurementsCache: undefined,
+    };
+  }, [location.pathname, notesSignature, storageKey, useSimpleScrollRestoration]);
 
   // Track whether we're in scroll restoration mode to optimize rendering
-  const isScrollRestoring = useMemo(() => {
+  const [isScrollRestoring, setIsScrollRestoring] = useState(() => {
     try {
       return sessionStorage.getItem("virtualScrollRestorationLock") === "true";
     } catch {
       return false;
     }
-  }, []);
+  });
 
   // Detect iOS Safari navigation gestures (swipe-back)
   const isNavigatingRef = useRef(false);
@@ -308,7 +380,9 @@ export const VirtualizedFeed: React.FC<VirtualizedFeedProps> = ({
     const handleResize = () => {
       // Skip resize handling during navigation gestures
       if (isNavigatingRef.current || isScrollRestoring) {
-        console.log("🚫 Skipping resize during navigation/restoration");
+        if (import.meta.env.DEV) {
+          console.log("🚫 Skipping resize during navigation/restoration");
+        }
         return;
       }
 
@@ -350,13 +424,29 @@ export const VirtualizedFeed: React.FC<VirtualizedFeedProps> = ({
     };
   }, [isScrollRestoring]);
 
-  // Mark as initialized after a short delay to allow initial content to settle
-  useEffect(() => {
-    const timer = setTimeout(() => {
-      hasInitializedRef.current = true;
-    }, 500);
-    return () => clearTimeout(timer);
+  // Enable pagination after first paint so virtualizer + scroll parent exist
+  useLayoutEffect(() => {
+    let cancelled = false;
+    const id = requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        if (!cancelled) hasInitializedRef.current = true;
+      });
+    });
+    return () => {
+      cancelled = true;
+      cancelAnimationFrame(id);
+    };
   }, []);
+
+  // Re-arm infinite scroll after each page completes so we can fetch again when
+  // the last visible index did not change (e.g. page returned no new visible rows).
+  useEffect(() => {
+    const was = prevIsFetchingNextPageRef.current;
+    prevIsFetchingNextPageRef.current = isFetchingNextPage;
+    if (was && !isFetchingNextPage) {
+      lastFetchIndexRef.current = -1;
+    }
+  }, [isFetchingNextPage]);
 
   // No longer need user scroll detection - removed to fix infinite scroll
 
@@ -392,7 +482,7 @@ export const VirtualizedFeed: React.FC<VirtualizedFeedProps> = ({
     createHeightEstimator,
     recordImageDimensions,
     recordActualHeight,
-    clearDimensionsCache,
+    clearNoteDimensionsCache,
     restoreImageDimensionsCache,
   } = useNoteDynamicHeight({
     isMobile,
@@ -436,36 +526,29 @@ export const VirtualizedFeed: React.FC<VirtualizedFeedProps> = ({
   // Restore cached ASCII content when initial scroll state is available
   useEffect(() => {
     if (initialScrollState?.cachedAsciiCache && setAsciiCache) {
-      // Merge the cached ASCII content with existing cache
-      // This ensures we don't lose any ASCII content that was rendered after the scroll state was saved
-      const mergedAsciiCache = {
-        ...asciiCache,
-        ...initialScrollState.cachedAsciiCache,
-      };
-      // Only update if there are new entries to avoid unnecessary re-renders
-      const hasNewEntries = Object.keys(
-        initialScrollState.cachedAsciiCache
-      ).some(
-        (url) =>
-          !asciiCache[url] ||
-          asciiCache[url].timestamp <
-            initialScrollState.cachedAsciiCache![url].timestamp
-      );
-      if (hasNewEntries) {
-        setAsciiCache(mergedAsciiCache);
-        console.log(
-          `🔄 Restored ${
-            Object.keys(initialScrollState.cachedAsciiCache).length
-          } cached ASCII entries`
-        );
-      }
+      setAsciiCache((prev) => {
+        let next = prev;
+        let changed = false;
+        for (const [url, entry] of Object.entries(initialScrollState.cachedAsciiCache || {})) {
+          const current = next[url];
+          if (!current || current.timestamp < entry.timestamp) {
+            next = addAsciiCacheEntry(next, url, entry.ascii, { now: entry.timestamp });
+            changed = true;
+          }
+        }
+        if (changed && import.meta.env.DEV) {
+          console.log(
+            `🔄 Restored ${Object.keys(initialScrollState.cachedAsciiCache || {}).length} cached ASCII entries`
+          );
+        }
+        return changed ? next : prev;
+      });
     }
-  }, [initialScrollState?.cachedAsciiCache, asciiCache, setAsciiCache]);
+  }, [initialScrollState?.cachedAsciiCache, setAsciiCache]);
 
   // Create height estimator function based on current notes and window size
   const estimateSize = useMemo(() => {
-    // Clear dimensions cache when notes or window size changes
-    clearDimensionsCache();
+    // Do not clear image/note caches here — that forces cold estimates and extra remeasure churn.
 
     // Create estimator with current window dimensions and profile key
     const estimator = createHeightEstimator(notes, storageKey);
@@ -527,7 +610,6 @@ export const VirtualizedFeed: React.FC<VirtualizedFeedProps> = ({
   }, [
     createHeightEstimator,
     notes,
-    clearDimensionsCache,
     windowWidth,
     isMobile,
     imageMode,
@@ -538,7 +620,7 @@ export const VirtualizedFeed: React.FC<VirtualizedFeedProps> = ({
     count: notes.length,
     getScrollElement: () => parentRef.current,
     estimateSize,
-    overscan: isMobile ? 3 : 5, // Increase offscreen rendering for better prefetching performance
+    overscan: isMobile ? 2 : 4,
     // Do not set initialOffset; router-aware restoration will position precisely by id+offset
     // Note: TanStack Virtual doesn't support initialMeasurementsCache directly
     // We'll apply cached measurements in the measureElement function
@@ -670,9 +752,11 @@ export const VirtualizedFeed: React.FC<VirtualizedFeedProps> = ({
       // BUT allow remeasurement for repost content to prevent clipping
       const stabilizer = getGlobalScrollStabilizer();
       if (stabilizer.isStabilizing() && !isRepostContent) {
-        console.log(
-          `🔒 Skipping re-measurement for Note ${noteId} during scroll stabilization`
-        );
+        if (import.meta.env.DEV) {
+          console.log(
+            `🔒 Skipping re-measurement for Note ${noteId} during scroll stabilization`
+          );
+        }
         return;
       }
 
@@ -705,9 +789,11 @@ export const VirtualizedFeed: React.FC<VirtualizedFeedProps> = ({
         );
 
         if (stabilizer.isStabilizing() && !hasRepostContent) {
-          console.log(
-            `🔒 Cancelling batched re-measurement during scroll stabilization`
-          );
+          if (import.meta.env.DEV) {
+            console.log(
+              `🔒 Cancelling batched re-measurement during scroll stabilization`
+            );
+          }
           pendingMeasurements.current.clear();
           return;
         }
@@ -742,9 +828,11 @@ export const VirtualizedFeed: React.FC<VirtualizedFeedProps> = ({
                   if (isAboveViewport && scrollEl) {
                     scrollEl.scrollTop += delta; // compensate to keep visible content anchored
                   }
-                  console.log(
-                    `📏 Note ${noteIndex} height updated: ${oldHeight}px → ${newHeight}px (Δ${delta}px)`
-                  );
+                  if (import.meta.env.DEV) {
+                    console.log(
+                      `📏 Note ${noteIndex} height updated: ${oldHeight}px → ${newHeight}px (Δ${delta}px)`
+                    );
+                  }
                 }
               }
             }
@@ -765,7 +853,9 @@ export const VirtualizedFeed: React.FC<VirtualizedFeedProps> = ({
       isScrollRestoring ||
       isRestoringRef.current
     ) {
-      console.log("🚫 Skipping re-measurement during navigation/restoration");
+      if (import.meta.env.DEV) {
+        console.log("🚫 Skipping re-measurement during navigation/restoration");
+      }
       return;
     }
 
@@ -797,9 +887,11 @@ export const VirtualizedFeed: React.FC<VirtualizedFeedProps> = ({
             virtualizer.measureElement(element);
           }
         });
-        console.log(
-          `🔄 Re-measured ${visibleItems.length} items after window resize`
-        );
+        if (import.meta.env.DEV) {
+          console.log(
+            `🔄 Re-measured ${visibleItems.length} items after window resize`
+          );
+        }
       }, debounceMs);
 
       return () => clearTimeout(timeout);
@@ -818,34 +910,34 @@ export const VirtualizedFeed: React.FC<VirtualizedFeedProps> = ({
 
     // Only remeasure if new notes were added (length increased)
     if (currentLength > previousLength) {
-      // Debounced re-measurement after new notes load
+      const isMobileDevice = window.innerWidth <= 768;
+      // Debounced re-measurement after new notes load — cap how many rows we touch (layout thrash).
       const timeout = setTimeout(() => {
         const visibleItems = virtualizer.getVirtualItems();
 
         if (visibleItems.length > 0) {
-          // Re-measure all visible items to account for layout shifts
-          visibleItems.forEach((item) => {
+          const maxToMeasure = isMobileDevice ? 3 : 6;
+          visibleItems.slice(0, maxToMeasure).forEach((item) => {
             const element = parentRef.current?.querySelector(
               `[data-index="${item.index}"]`
             );
             if (element) {
-              // Force fresh measurement
               virtualizer.measureElement(element);
             }
           });
 
-          console.log(
-            `📐 Re-measured ${
-              visibleItems.length
-            } visible items after loading ${
-              currentLength - previousLength
-            } new notes`
-          );
+          if (import.meta.env.DEV) {
+            console.log(
+              `📐 Re-measured (capped) visible items after loading ${
+                currentLength - previousLength
+              } new notes`
+            );
+          }
         }
 
         // Update the ref for next comparison
         prevNotesLengthRef.current = currentLength;
-      }, 150); // Short delay to let new items render
+      }, 200);
 
       return () => clearTimeout(timeout);
     } else {
@@ -860,6 +952,51 @@ export const VirtualizedFeed: React.FC<VirtualizedFeedProps> = ({
   const virtualItems = virtualizer.getVirtualItems();
   const lastVisibleIndex =
     virtualItems.length > 0 ? virtualItems[virtualItems.length - 1]?.index : -1;
+  const firstVisibleIndex =
+    virtualItems.length > 0 ? virtualItems[0]?.index : -1;
+
+  useEffect(() => {
+    if (!onVisibleRangeChange || !virtualizer) return;
+    const items = virtualizer.getVirtualItems();
+    if (items.length === 0) return;
+    if (visibleRangeRafRef.current != null) {
+      cancelAnimationFrame(visibleRangeRafRef.current);
+    }
+    visibleRangeRafRef.current = requestAnimationFrame(() => {
+      visibleRangeRafRef.current = null;
+      const vis = virtualizer.getVirtualItems();
+      if (vis.length === 0) return;
+      const start = vis[0].index;
+      const end = vis[vis.length - 1].index;
+      const centerIndex = Math.floor((start + end) / 2);
+      const now = typeof performance !== "undefined" ? performance.now() : Date.now();
+      const prev = lastReportedVisibleRef.current;
+      const centerDelta = prev ? Math.abs(centerIndex - prev.center) : 999;
+      const timeSince = prev ? now - prev.at : 9999;
+      // Throttle parent updates: material center move, range shift, or slow tail
+      if (
+        prev &&
+        centerDelta < 3 &&
+        start === prev.start &&
+        end === prev.end &&
+        timeSince < 280
+      ) {
+        return;
+      }
+      lastReportedVisibleRef.current = { center: centerIndex, start, end, at: now };
+      onVisibleRangeChange({
+        startIndex: start,
+        endIndex: end,
+        centerIndex,
+      });
+    });
+    return () => {
+      if (visibleRangeRafRef.current != null) {
+        cancelAnimationFrame(visibleRangeRafRef.current);
+        visibleRangeRafRef.current = null;
+      }
+    };
+  }, [onVisibleRangeChange, virtualizer, lastVisibleIndex, firstVisibleIndex]);
 
   // ✅ Enhanced infinite scroll - paused briefly during restoration
   useEffect(() => {
@@ -879,8 +1016,8 @@ export const VirtualizedFeed: React.FC<VirtualizedFeedProps> = ({
     // Calculate buffer zone based on device type and current notes
     // More aggressive buffering on mobile for smoother scrolling
     const isMobileDevice = window.innerWidth <= 768;
-    const baseBuffer = isMobileDevice ? 15 : 20; // Increased base buffer items
-    const dynamicBuffer = Math.min(Math.floor(notes.length * 0.15), 30); // 15% of notes, max 30
+    const baseBuffer = isMobileDevice ? 6 : 10;
+    const dynamicBuffer = Math.min(Math.floor(notes.length * 0.06), 12);
     const bufferZone = Math.max(baseBuffer, dynamicBuffer);
 
     // Start loading when we're within the buffer zone of the end
@@ -892,10 +1029,18 @@ export const VirtualizedFeed: React.FC<VirtualizedFeedProps> = ({
       hasNextPage &&
       !isFetchingNextPage
     ) {
-      console.log(
-        `🔄 Infinite scroll triggered: item ${lastVirtualItem.index}/${notes.length}, trigger at ${triggerIndex}, buffer ${bufferZone}`
-      );
+      const endFeedPaginationMetric = startFeedMetric("feed_pagination", {
+        noteCount: notes.length,
+        lastVisibleIndex: lastVirtualItem.index,
+        triggerIndex,
+      });
+      if (import.meta.env.DEV) {
+        console.log(
+          `🔄 Infinite scroll triggered: item ${lastVirtualItem.index}/${notes.length}, trigger at ${triggerIndex}, buffer ${bufferZone}`
+        );
+      }
       fetchNextPage();
+      endFeedPaginationMetric({ status: "triggered" });
       lastFetchIndexRef.current = lastVirtualItem.index;
     }
   }, [
@@ -920,20 +1065,22 @@ export const VirtualizedFeed: React.FC<VirtualizedFeedProps> = ({
     const totalSize = virtualizer.getTotalSize();
     const viewport = el.clientHeight;
 
-    // If we cannot scroll and we have more pages, prefetch up to 5 times to fill
-    // Increased from 3 to 5 to better handle viewport filling
+    const isMobileDevice = window.innerWidth <= 768;
+    const maxNoScrollPrefetches = isMobileDevice ? 2 : 4;
     if (
       totalSize > 0 &&
       totalSize <= viewport &&
       hasNextPage &&
       !isFetchingNextPage &&
-      noScrollPrefetchCountRef.current < 5
+      noScrollPrefetchCountRef.current < maxNoScrollPrefetches
     ) {
-      console.log(
-        `🔄 Prefetch triggered (attempt ${
-          noScrollPrefetchCountRef.current + 1
-        }/5): totalSize=${totalSize}px, viewport=${viewport}px`
-      );
+      if (import.meta.env.DEV) {
+        console.log(
+          `🔄 Prefetch triggered (attempt ${
+            noScrollPrefetchCountRef.current + 1
+          }/${maxNoScrollPrefetches}): totalSize=${totalSize}px, viewport=${viewport}px`
+        );
+      }
       noScrollPrefetchCountRef.current += 1;
       fetchNextPage();
     }
@@ -969,16 +1116,73 @@ export const VirtualizedFeed: React.FC<VirtualizedFeedProps> = ({
     debug,
     onRestoreStart: () => {
       isRestoringRef.current = true;
+      setIsScrollRestoring(true);
       setRestoreGeneration((g) => g + 1);
     },
     onRestoreComplete: () => {
       // Allow a short settling window
-      setTimeout(() => {
+      if (restoreCompleteTimerRef.current != null) {
+        clearTimeout(restoreCompleteTimerRef.current);
+      }
+      restoreCompleteTimerRef.current = window.setTimeout(() => {
         isRestoringRef.current = false;
+        setIsScrollRestoring(false);
         setRestoreGeneration((g) => g + 1);
       }, 300);
     },
   });
+
+  useEffect(() => {
+    return () => {
+      if (restoreCompleteTimerRef.current != null) {
+        clearTimeout(restoreCompleteTimerRef.current);
+        restoreCompleteTimerRef.current = null;
+      }
+    };
+  }, []);
+
+  // Trim stale measurement entries far outside the viewport window.
+  useEffect(() => {
+    const cache = (virtualizer as any)?.measurementsCache;
+    if (!Array.isArray(cache) || cache.length < 1400) return;
+    const minKeep = Math.max(0, firstVisibleIndex - 500);
+    const maxKeep = Math.min(notes.length - 1, lastVisibleIndex + 500);
+    let trimmed = 0;
+    for (let i = 0; i < cache.length; i += 1) {
+      if (i < minKeep || i > maxKeep) {
+        if (cache[i] !== undefined) {
+          cache[i] = undefined;
+          trimmed += 1;
+        }
+      }
+    }
+    if (trimmed > 0) {
+      recordFeedMetric("memory_cache", 0, {
+        action: "trim_measurements",
+        trimmed,
+        minKeep,
+        maxKeep,
+        cacheLength: cache.length,
+      });
+    }
+  }, [firstVisibleIndex, lastVisibleIndex, notes.length, virtualizer]);
+
+  // Dev-only memory snapshots for long-scroll sessions.
+  useEffect(() => {
+    if (!import.meta.env.DEV) return;
+    const id = window.setInterval(() => {
+      const cache = (virtualizer as any)?.measurementsCache;
+      recordFeedMetric("memory_cache", 0, {
+        action: "snapshot",
+        noteCount: notes.length,
+        asciiCacheCount: Object.keys(asciiCache || {}).length,
+        measurementEntries: Array.isArray(cache)
+          ? cache.filter((entry: unknown) => entry !== undefined).length
+          : 0,
+      });
+    }, 30000);
+    return () => clearInterval(id);
+  }, [asciiCache, notes.length, virtualizer]);
 
   // Clear saved position when notes change significantly (new filter, etc.)
   useEffect(() => {
@@ -1016,9 +1220,11 @@ export const VirtualizedFeed: React.FC<VirtualizedFeedProps> = ({
 
           // Scroll to the top of the feed
           parentRef.current.scrollTop = 0;
-          console.log(
-            "📍 Scrolled virtual feed to top and cleared saved position"
-          );
+          if (import.meta.env.DEV) {
+            console.log(
+              "📍 Scrolled virtual feed to top and cleared saved position"
+            );
+          }
         }
       };
     }
@@ -1040,33 +1246,39 @@ export const VirtualizedFeed: React.FC<VirtualizedFeedProps> = ({
   // Create shared ResizeObserver for all feed items to reduce CPU usage
   const sharedResizeObserver = useMemo(() => {
     return new ResizeObserver((entries) => {
-      // Handle all resize events in one observer
+      const stabilizer = getGlobalScrollStabilizer();
+      if (stabilizer.isStabilizing()) return;
+
       for (const entry of entries) {
         const target = entry.target as HTMLElement;
-        const noteIdAttr = target.getAttribute('data-note-id');
-        const indexAttr = target.getAttribute('data-index');
-        
+        const noteIdAttr = target.getAttribute("data-note-id");
+        const indexAttr = target.getAttribute("data-index");
+
         if (noteIdAttr && recordActualHeight && storageKey) {
           const newHeight = entry.contentRect.height;
           if (newHeight > 0) {
             recordActualHeight(noteIdAttr, newHeight, storageKey);
           }
         }
-        
-        // Trigger remeasurement for virtualizer
-        if (indexAttr !== null && parentRef.current) {
-          const stabilizer = getGlobalScrollStabilizer();
-          if (!stabilizer.isStabilizing()) {
-            setTimeout(() => {
-              if (parentRef.current && !stabilizer.isStabilizing()) {
-                const element = parentRef.current.querySelector(`[data-index="${indexAttr}"]`);
-                if (element) {
-                  virtualizer.measureElement(element);
-                }
-              }
-            }, 200); // Increased debounce from 100ms to 200ms
-          }
+
+        if (indexAttr !== null) {
+          pendingResizeMeasureIndicesRef.current.add(indexAttr);
         }
+      }
+
+      if (sharedResizeMeasureRafRef.current == null) {
+        sharedResizeMeasureRafRef.current = requestAnimationFrame(() => {
+          sharedResizeMeasureRafRef.current = null;
+          const parent = parentRef.current;
+          if (!parent) return;
+          if (getGlobalScrollStabilizer().isStabilizing()) return;
+          const indices = pendingResizeMeasureIndicesRef.current;
+          pendingResizeMeasureIndicesRef.current = new Set();
+          indices.forEach((indexAttr) => {
+            const element = parent.querySelector(`[data-index="${indexAttr}"]`);
+            if (element) virtualizer.measureElement(element);
+          });
+        });
       }
     });
   }, [virtualizer, recordActualHeight, storageKey]);
@@ -1074,9 +1286,44 @@ export const VirtualizedFeed: React.FC<VirtualizedFeedProps> = ({
   // Cleanup shared observer on unmount
   useEffect(() => {
     return () => {
+      if (sharedResizeMeasureRafRef.current != null) {
+        cancelAnimationFrame(sharedResizeMeasureRafRef.current);
+        sharedResizeMeasureRafRef.current = null;
+      }
+      pendingResizeMeasureIndicesRef.current.clear();
       sharedResizeObserver.disconnect();
     };
   }, [sharedResizeObserver]);
+
+  // After real viewport width changes, drop stale per-note estimates (keep image dimension cache warm).
+  const didInitWindowWidthRef = useRef(false);
+  useEffect(() => {
+    if (!didInitWindowWidthRef.current) {
+      didInitWindowWidthRef.current = true;
+      return;
+    }
+    clearNoteDimensionsCache();
+  }, [windowWidth, clearNoteDimensionsCache]);
+
+  // Feed scroll activity for prefetch / idle work (debounced).
+  useEffect(() => {
+    const el = parentRef.current;
+    if (!el || !feedScrollActivityRef) return;
+    let scrollEndTimer: number | null = null;
+    const onScroll = () => {
+      feedScrollActivityRef.current = { active: true };
+      if (scrollEndTimer) window.clearTimeout(scrollEndTimer);
+      scrollEndTimer = window.setTimeout(() => {
+        scrollEndTimer = null;
+        feedScrollActivityRef.current = { active: false };
+      }, 200);
+    };
+    el.addEventListener("scroll", onScroll, { passive: true });
+    return () => {
+      el.removeEventListener("scroll", onScroll);
+      if (scrollEndTimer) window.clearTimeout(scrollEndTimer);
+    };
+  }, [feedScrollActivityRef]);
 
   return (
     <div
@@ -1149,7 +1396,8 @@ export const VirtualizedFeed: React.FC<VirtualizedFeedProps> = ({
                   <NoteCard
                     note={note}
                     index={virtualItem.index}
-                    metadata={metadata}
+                    authorMetadata={getMetadataForPubkey(metadata, note.pubkey)}
+                    deferHeavyQueries
                     asciiCache={asciiCache}
                     isDarkMode={isDarkMode}
                     useAscii={useAscii}

@@ -38,18 +38,31 @@ class QueryThrottleManager {
 
   private getDynamicConfig(): ThrottleConfig {
     const isDiscoveryActive = (globalThis as any).__outboxDiscoveryActive || false;
-    
+    const feedPaginationActive =
+      (globalThis as any).__feedPaginationActive || false;
+
+    let base: ThrottleConfig = this.config;
+
+    // While the main feed is loading the next page, cap metadata concurrency so
+    // author metadata fan-out does not starve feed slot acquisition.
+    if (feedPaginationActive) {
+      base = {
+        ...base,
+        maxMetadataQueries: Math.min(base.maxMetadataQueries, 2),
+      };
+    }
+
     if (isDiscoveryActive) {
       // Reduce feed queries during discovery to prevent relay conflicts
       return {
-        ...this.config,
+        ...base,
         maxFeedQueries: 1, // Only 1 feed query during discovery
         // Always prioritize feed work over discovery to avoid UI timeouts on login (iOS Safari)
-        priority: ['feed', 'profile', 'metadata', 'discovery']
+        priority: ['feed', 'profile', 'metadata', 'discovery'],
       };
     }
-    
-    return this.config;
+
+    return base;
   }
 
   private getMaxQueries(type: QueryType): number {

@@ -46,7 +46,14 @@ import { prefetchThread } from "../utils/thread/prefetch";
 interface NoteCardProps {
   note: Note;
   index: number;
-  metadata: Record<string, Metadata>;
+  /** Full map (optional). Prefer `authorMetadata` in virtualized lists to avoid rerenders. */
+  metadata?: Record<string, Metadata> | null;
+  /** This note author's metadata only (stable reference when unchanged). */
+  authorMetadata?: Metadata | null;
+  /** Defer zap/reaction/reply/parent fetches until near-viewport (main feed). */
+  deferHeavyQueries?: boolean;
+  /** Optional delay before enabling heavy note subqueries after intersection. */
+  deferHeavyQueriesDelayMs?: number;
   asciiCache: Record<string, { ascii: string; timestamp: number }>;
   isDarkMode: boolean;
   useAscii: boolean;
@@ -79,7 +86,10 @@ interface NoteCardProps {
 const NoteCardComponent: React.FC<NoteCardProps> = ({
   note,
   index,
-  metadata: _metadata,
+  metadata,
+  authorMetadata,
+  deferHeavyQueries = false,
+  deferHeavyQueriesDelayMs = 250,
   asciiCache,
   useAscii,
   useColor,
@@ -103,6 +113,41 @@ const NoteCardComponent: React.FC<NoteCardProps> = ({
   onHashtagClick,
   showFullContent = false,
 }) => {
+  const modalAuthorMetadata =
+    authorMetadata ?? metadata?.[note.pubkey] ?? null;
+
+  const cardRootRef = useRef<HTMLDivElement | null>(null);
+  const [heavyQueriesEnabled, setHeavyQueriesEnabled] = useState(!deferHeavyQueries);
+  const deferredEnableTimerRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    if (!deferHeavyQueries) return;
+    const el = cardRootRef.current;
+    if (!el) return;
+    const obs = new IntersectionObserver(
+      (entries) => {
+        const hit = entries.some((e) => e.isIntersecting);
+        if (hit) {
+          if (deferredEnableTimerRef.current) {
+            clearTimeout(deferredEnableTimerRef.current);
+          }
+          deferredEnableTimerRef.current = window.setTimeout(() => {
+            setHeavyQueriesEnabled(true);
+          }, deferHeavyQueriesDelayMs);
+          obs.disconnect();
+        }
+      },
+      { root: null, rootMargin: "200px 0px 200px 0px", threshold: 0.01 }
+    );
+    obs.observe(el);
+    return () => {
+      obs.disconnect();
+      if (deferredEnableTimerRef.current) {
+        clearTimeout(deferredEnableTimerRef.current);
+        deferredEnableTimerRef.current = null;
+      }
+    };
+  }, [deferHeavyQueries, deferHeavyQueriesDelayMs, note.id]);
   // Do not early-return before hooks; compute validity and handle later in render
   const isValidNote = useMemo(() => {
     try {
@@ -137,7 +182,6 @@ const NoteCardComponent: React.FC<NoteCardProps> = ({
   // Throttle prefetch calls to reduce CPU usage
   const lastPrefetchTimeRef = useRef<number>(0);
   const prefetchTimeoutRef = useRef<number | null>(null);
-  const isScrollingRef = useRef<boolean>(false);
 
   // Initialize pool
   React.useEffect(() => {
@@ -146,22 +190,8 @@ const NoteCardComponent: React.FC<NoteCardProps> = ({
     }
   }, []);
 
-  // Track scroll state to skip prefetch during active scrolling
   useEffect(() => {
-    let scrollTimeout: number | null = null;
-    const handleScroll = () => {
-      isScrollingRef.current = true;
-      if (scrollTimeout) clearTimeout(scrollTimeout);
-      scrollTimeout = window.setTimeout(() => {
-        isScrollingRef.current = false;
-      }, 150);
-    };
-
-    window.addEventListener('scroll', handleScroll, { passive: true });
     return () => {
-      window.removeEventListener('scroll', handleScroll);
-      if (scrollTimeout) clearTimeout(scrollTimeout);
-      // Cleanup prefetch timeout on unmount
       if (prefetchTimeoutRef.current) {
         clearTimeout(prefetchTimeoutRef.current);
       }
@@ -322,6 +352,7 @@ const NoteCardComponent: React.FC<NoteCardProps> = ({
     noteId: note.id || null,
     relayUrls: readRelayUrls,
     noteAuthorPubkey: note.pubkey || undefined,
+    enabled: heavyQueriesEnabled,
   });
 
   const totalSats = zapTotals?.totalSats || 0;
@@ -341,13 +372,15 @@ const NoteCardComponent: React.FC<NoteCardProps> = ({
       note.id || null,
       reactionRelayUrls,
       nostrClient,
-      myPubkey
+      myPubkey,
+      heavyQueriesEnabled
     );
 
   const { count: replyCount } = useReplyCountQuery(
     note.id || null,
     reactionRelayUrls,
-    nostrClient
+    nostrClient,
+    heavyQueriesEnabled
   );
 
   // Haptic feedback hook
@@ -409,6 +442,7 @@ const NoteCardComponent: React.FC<NoteCardProps> = ({
     parentNoteId: parentNoteId || undefined,
     parentNote: null, // We don't have the parent note data yet, will need to fetch it
     relayUrls: readRelayUrls,
+    enabled: heavyQueriesEnabled,
   });
 
   // Get repost target data for repost context
@@ -420,6 +454,7 @@ const NoteCardComponent: React.FC<NoteCardProps> = ({
     repostTargetId: repostTargetId || undefined,
     repostTargetNote: null, // We don't have the repost target note data yet, will need to fetch it
     relayUrls: readRelayUrls,
+    enabled: heavyQueriesEnabled,
   });
 
   const goToNote = useCallback(() => {
@@ -836,12 +871,12 @@ const NoteCardComponent: React.FC<NoteCardProps> = ({
 
   return (
     <div
+      ref={cardRootRef}
       key={uniqueKey}
       className="note-card"
       data-note-id={note.id}
       onMouseEnter={() => {
-        // Skip prefetch if user is actively scrolling
-        if (isScrollingRef.current) return;
+        if (deferHeavyQueries && !heavyQueriesEnabled) return;
         
         const now = Date.now();
         const timeSinceLastPrefetch = now - lastPrefetchTimeRef.current;
@@ -903,8 +938,7 @@ const NoteCardComponent: React.FC<NoteCardProps> = ({
         lastPrefetchTimeRef.current = now;
       }}
       onTouchStart={() => {
-        // Skip prefetch if user is actively scrolling
-        if (isScrollingRef.current) return;
+        if (deferHeavyQueries && !heavyQueriesEnabled) return;
         
         const now = Date.now();
         const timeSinceLastPrefetch = now - lastPrefetchTimeRef.current;
@@ -1101,7 +1135,7 @@ const NoteCardComponent: React.FC<NoteCardProps> = ({
         setShowZapModal={setShowZapModal}
         updateZapModalState={updateZapModalState}
         myPubkey={myPubkey}
-        _metadata={_metadata}
+        _metadata={modalAuthorMetadata}
         readRelayUrls={readRelayUrls}
         writeRelayUrls={writeRelayUrls}
         useAscii={useAscii}

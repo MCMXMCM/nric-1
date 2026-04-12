@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect, useCallback } from "react";
+import React, { useState, useRef, useEffect, useCallback, useMemo } from "react";
 import { createPortal } from "react-dom";
 import { useHaptic } from "use-haptic";
 
@@ -32,6 +32,12 @@ export const RadialMenu: React.FC<RadialMenuProps> = ({
   const pressTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const touchStartPosRef = useRef<{ x: number; y: number } | null>(null);
   const previousSelectedOptionRef = useRef<RadialMenuOption | null>(null);
+  const isCoarsePointer = useMemo(() => {
+    if (typeof window === "undefined" || typeof window.matchMedia !== "function") {
+      return false;
+    }
+    return window.matchMedia("(pointer: coarse)").matches;
+  }, []);
 
   // Close menu when clicking outside or on touch end
   useEffect(() => {
@@ -526,11 +532,11 @@ export const RadialMenu: React.FC<RadialMenuProps> = ({
             backgroundColor: "transparent",
             border: "none",
             outline: "none",
+            pointerEvents: isCoarsePointer ? "auto" : "none",
           }}
           onTouchStart={handleTouchStart}
           onTouchMove={handleTouchMove}
           onTouchEnd={handleTouchEnd}
-          onMouseDown={handleMouseDown}
         />
 
         {/* Main dial button - Vintage control dial design */}
@@ -566,6 +572,15 @@ export const RadialMenu: React.FC<RadialMenuProps> = ({
                 triggerHaptic();
               } catch (error) {
                 // Silently handle haptic feedback errors
+              }
+              // Desktop: toggle menu on click for discoverable interactions.
+              if (!isCoarsePointer) {
+                setIsOpen((prev) => !prev);
+                if (isOpen) {
+                  setIsDragging(false);
+                  setSelectedOption(null);
+                  previousSelectedOptionRef.current = null;
+                }
               }
             }}
             onTouchStart={handleTouchStart}
