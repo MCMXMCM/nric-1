@@ -1,3 +1,7 @@
+# ARCHIVED
+
+This was just an exploratory vibe experiment that I replaced with my more fully realized and polished https://plaintextnostr.com
+
 # NRIC-1 - Note Relay Interlink Client
 
 **Note Relay Interlink Client** (pronounced: "en-rick") is a specialized Nostr client for the user who wants to be "on the road" not "in the car" when driving software. Inspired by the golden years of computing when less wasn't more and users wanted control.
